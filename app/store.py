@@ -65,11 +65,20 @@ class MetadataStore:
                     notes                TEXT,
                     presence_candidate   INTEGER DEFAULT 0,
                     automation_candidate INTEGER DEFAULT 0,
+                    ignored              INTEGER DEFAULT 0,
+                    is_known             INTEGER,
                     first_seen_at        REAL,
                     updated_at           REAL
                 )
                 """
             )
+            # additive migration for installs created before ignored/is_known
+            # existed — sqlite has no "add column if not exists", so probe first.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(device_metadata)")}
+            if "ignored" not in cols:
+                conn.execute("ALTER TABLE device_metadata ADD COLUMN ignored INTEGER DEFAULT 0")
+            if "is_known" not in cols:
+                conn.execute("ALTER TABLE device_metadata ADD COLUMN is_known INTEGER")
 
     def all(self) -> dict[str, DeviceMetadata]:
         with self._connect() as conn:
@@ -87,6 +96,8 @@ class MetadataStore:
                 notes=r["notes"],
                 presence_candidate=bool(r["presence_candidate"]),
                 automation_candidate=bool(r["automation_candidate"]),
+                ignored=bool(r["ignored"]),
+                is_known=None if r["is_known"] is None else bool(r["is_known"]),
                 first_seen_at=r["first_seen_at"],
                 updated_at=r["updated_at"],
             )
@@ -99,8 +110,8 @@ class MetadataStore:
                 INSERT INTO device_metadata (
                     mac_address, display_name, device_type, role, trust_level,
                     owner, tags, notes, presence_candidate, automation_candidate,
-                    first_seen_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    ignored, is_known, first_seen_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(mac_address) DO UPDATE SET
                     display_name=excluded.display_name,
                     device_type=excluded.device_type,
@@ -111,6 +122,8 @@ class MetadataStore:
                     notes=excluded.notes,
                     presence_candidate=excluded.presence_candidate,
                     automation_candidate=excluded.automation_candidate,
+                    ignored=excluded.ignored,
+                    is_known=excluded.is_known,
                     first_seen_at=COALESCE(device_metadata.first_seen_at, excluded.first_seen_at),
                     updated_at=excluded.updated_at
                 """,
@@ -118,6 +131,8 @@ class MetadataStore:
                     meta.mac_address, meta.display_name, meta.device_type, meta.role,
                     meta.trust_level, meta.owner, json.dumps(meta.tags), meta.notes,
                     int(meta.presence_candidate), int(meta.automation_candidate),
+                    int(meta.ignored),
+                    None if meta.is_known is None else int(meta.is_known),
                     meta.first_seen_at, meta.updated_at,
                 ),
             )

@@ -44,6 +44,49 @@ def test_patch_persists_metadata():
         assert bad.status_code == 400
 
 
+def test_patch_rejects_source_owned_fields():
+    with TestClient(app) as client:
+        target = next(d for d in client.get("/devices").json()["devices"] if d["mac_address"])
+        # source-owned fields are silently dropped → "no editable fields" 400
+        bad = client.patch(f"/devices/{target['id']}",
+                           json={"mac_address": "00:00:00:00:00:00", "ip_addresses": ["1.2.3.4"]})
+        assert bad.status_code == 400
+        # an invalid enum value is a 422, never persisted
+        invalid = client.patch(f"/devices/{target['id']}", json={"trust_level": "superuser"})
+        assert invalid.status_code == 422
+
+
+def test_convenience_endpoints():
+    with TestClient(app) as client:
+        devices = client.get("/devices").json()["devices"]
+        target = next(d for d in devices if d["mac_address"])
+        did = target["id"]
+
+        known = client.post(f"/devices/{did}/mark-known").json()["device"]
+        assert known["is_known"] is True and known["trust_level"] == "known"
+
+        guest = client.post(f"/devices/{did}/mark-guest").json()["device"]
+        assert guest["trust_level"] == "guest"
+
+        ignored = client.post(f"/devices/{did}/ignore").json()["device"]
+        assert ignored["ignored"] is True
+
+        owned = client.post(f"/devices/{did}/assign-owner", json={"owner": "alex"}).json()["device"]
+        assert owned["owner"] == "alex"
+
+
+def test_device_detail_returns_events_and_interfaces():
+    with TestClient(app) as client:
+        devices = client.get("/devices").json()["devices"]
+        # the mock router has interfaces; pick a device that has one
+        target = next(d for d in devices if d["interfaces"])
+        detail = client.get(f"/devices/{target['id']}").json()
+        assert "device" in detail
+        assert "interfaces" in detail and isinstance(detail["interfaces"], list)
+        assert "events" in detail and "metrics" in detail
+        assert "presence_usage" in detail and "sources" in detail
+
+
 def test_wake_requires_trust():
     with TestClient(app) as client:
         devices = client.get("/devices").json()["devices"]

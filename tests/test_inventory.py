@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from app.config import Settings
-from app.models import EventType, NetworkDevice, SourceSnapshot
+from app.models import DeviceMetadata, EventType, NetworkDevice, SourceSnapshot
 from app.services.inventory import NetworkInventoryService
 from app.store import LiveStore, MetadataStore
 
@@ -77,6 +77,38 @@ def test_offline_grace_suppresses_immediate_offline():
     live.set_devices(out2)
     assert EventType.DEVICE_OFFLINE.value not in {e[0] for e in events}
     assert out2[0].is_online is True  # kept online during grace
+
+
+def _seed_baseline(inv, live):
+    """Run the silent cold-start baseline poll so later devices count as new."""
+    live.set_devices(inv.reconcile(inv.merge([_snap([])]), _collect([])))
+
+
+def test_ignored_device_does_not_emit_unknown_alert():
+    _, live, inv = _engine()
+    mac = "aa:bb:cc:ig:no:re"
+    inv.metadata._mem[mac] = DeviceMetadata(mac_address=mac, ignored=True)
+    inv.load_metadata()
+    _seed_baseline(inv, live)
+    events = []
+    fresh = inv.merge([_snap([NetworkDevice(id="x", mac_address=mac, is_online=True)])])
+    live.set_devices(inv.reconcile(fresh, _collect(events)))
+    types = {e[0] for e in events}
+    assert EventType.DEVICE_UNKNOWN_JOINED.value not in types
+
+
+def test_known_device_does_not_emit_unknown_alert():
+    _, live, inv = _engine()
+    mac = "aa:bb:cc:kn:ow:nn"
+    inv.metadata._mem[mac] = DeviceMetadata(mac_address=mac, trust_level="known")
+    inv.load_metadata()
+    _seed_baseline(inv, live)
+    events = []
+    fresh = inv.merge([_snap([NetworkDevice(id="x", mac_address=mac, is_online=True)])])
+    live.set_devices(inv.reconcile(fresh, _collect(events)))
+    types = {e[0] for e in events}
+    assert EventType.DEVICE_FIRST_SEEN.value in types
+    assert EventType.DEVICE_UNKNOWN_JOINED.value not in types
 
 
 def test_offline_emitted_after_grace():

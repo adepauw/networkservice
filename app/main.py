@@ -4,8 +4,13 @@ Endpoints (mounted under BASE_PATH when set, reached via /svc/network/... in Cat
     GET  /health                 liveness + per-source status + reachability
     GET  /summary                compact dashboard rollup
     GET  /devices                normalized device inventory (filterable)
-    GET  /devices/{id}           one device
+    GET  /devices/{id}           device detail (device, interfaces, events,
+                                 metrics, presence usage, source attribution)
     PATCH /devices/{id}          safe user-metadata edits (name/role/trust/...)
+    POST /devices/{id}/mark-known   mark device known (trusted inventory)
+    POST /devices/{id}/mark-guest   mark device as a guest device
+    POST /devices/{id}/ignore       ignore device (no more unknown-device alerts)
+    POST /devices/{id}/assign-owner assign an owner ({"owner": "..."} )
     POST /devices/{id}/wake      Wake-on-LAN (known/trusted devices only)
     GET  /events                 recent network events (filterable)
     GET  /events/stream          SSE live event stream

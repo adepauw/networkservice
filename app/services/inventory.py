@@ -42,6 +42,27 @@ class NetworkInventoryService:
         mac = identity.normalize_mac(mac)
         return self._metadata_cache.get(mac) if mac else None
 
+    @staticmethod
+    def _unknown_alert_metadata(dev: NetworkDevice, randomized: bool) -> dict:
+        """Rich payload for an unknown-device alert — everything CatOS needs to
+        render the card and recommend an action without a second round-trip."""
+        iface = dev.interfaces[0] if dev.interfaces else None
+        return {
+            "mac": dev.mac_address,
+            "device_id": dev.id,
+            "name": dev.name,
+            "vendor": dev.vendor,
+            "host_name": dev.host_name,
+            "ip_address": dev.ip_addresses[0] if dev.ip_addresses else None,
+            "connection_type": iface.connection_type if iface else None,
+            "band": iface.band if iface else None,
+            "first_seen_at": dev.first_seen_at,
+            "last_seen_at": dev.last_seen_at,
+            "randomized": randomized,
+            "advice": "Controleer of dit een bekend toestel is; maak het bekend, "
+                      "markeer als gast of negeer het.",
+        }
+
     def merge(self, snapshots: list) -> list[NetworkDevice]:
         """Pure-ish merge: snapshots -> canonical, metadata-overlaid device list."""
         canonical: dict[str, NetworkDevice] = {}
@@ -88,11 +109,21 @@ class NetworkInventoryService:
                     emit(EventType.DEVICE_FIRST_SEEN.value, "info",
                          f"Nieuw apparaat: {dev.name}",
                          dev.vendor or dev.host_name, dev, {"mac": dev.mac_address})
-                    if not dev.is_known:
-                        emit(EventType.DEVICE_UNKNOWN_JOINED.value, "warning",
-                             f"Onbekend apparaat verbonden: {dev.name}",
+                    # unknown-device alert — but never for devices the user has
+                    # told us to ignore (no noisy alerts) nor for known ones.
+                    if not dev.is_known and not dev.ignored:
+                        randomized = identity.is_randomized_mac(dev.mac_address)
+                        # guests are expected on the network → a softer signal.
+                        severity = "info" if dev.trust_level == "guest" else "warning"
+                        emit(EventType.DEVICE_UNKNOWN_JOINED.value, severity,
+                             f"Onbekend toestel gevonden: {dev.name}",
                              f"{dev.vendor or 'onbekende fabrikant'} · {', '.join(dev.ip_addresses) or '?'}",
-                             dev, {"mac": dev.mac_address, "randomized": identity.is_randomized_mac(dev.mac_address)})
+                             dev, self._unknown_alert_metadata(dev, randomized))
+                        if randomized:
+                            emit(EventType.DEVICE_RANDOMIZED_MAC_SUSPECTED.value, "info",
+                                 f"Toevallig MAC-adres vermoed: {dev.name}",
+                                 "Het apparaat gebruikt waarschijnlijk een privacy-/random MAC-adres.",
+                                 dev, {"mac": dev.mac_address})
             else:
                 dev.first_seen_at = old.first_seen_at
                 if old.is_known and not old.is_online and dev.is_online:

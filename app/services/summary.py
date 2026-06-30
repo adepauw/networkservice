@@ -30,7 +30,7 @@ def build_summary(
 ) -> dict:
     devices = live.device_list()
     online = [d for d in devices if d.is_online]
-    unknown = [d for d in online if not d.is_known and d.trust_level != "ignored"]
+    unknown = [d for d in online if not d.is_known and not d.ignored]
     guests = [d for d in online if d.trust_level == "guest"]
     alerts = live.alerts()
     last_event = live.events[0] if live.events else None

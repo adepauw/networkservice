@@ -87,6 +87,7 @@ def apply_metadata(device: NetworkDevice, meta: DeviceMetadata | None) -> Networ
     if meta is None:
         # No saved metadata -> it's an unknown/unmanaged device.
         device.is_known = device.trust_level in ("trusted", "known")
+        device.ignored = device.trust_level == "ignored"
         return device
     d = device.model_copy(deep=True)
     if meta.display_name:
@@ -107,8 +108,14 @@ def apply_metadata(device: NetworkDevice, meta: DeviceMetadata | None) -> Networ
     d.automation_candidate = meta.automation_candidate
     if meta.first_seen_at:
         d.first_seen_at = meta.first_seen_at
-    # "Known" = the user has saved metadata and not marked it unknown/blocked.
-    d.is_known = d.trust_level in ("trusted", "known", "guest")
+    # ignored = explicit flag OR the legacy trust_level sentinel.
+    d.ignored = meta.ignored or d.trust_level == "ignored"
+    # "Known" = an explicit user override if set, else derived from trust_level
+    # (the user saved metadata and didn't mark it unknown/blocked/ignored).
+    if meta.is_known is not None:
+        d.is_known = meta.is_known
+    else:
+        d.is_known = d.trust_level in ("trusted", "known", "guest")
     if is_randomized_mac(d.mac_address):
         d.metadata["randomized_mac"] = True
     return d

@@ -30,8 +30,11 @@ from ..models import (
     now,
 )
 
-PRIMARY_WEIGHT = 0.8
-SUPPORTING_WEIGHT = 0.2
+PRIMARY_WEIGHT = 0.75
+SUPPORTING_WEIGHT = 0.25
+# while a primary device is within its offline grace we keep a fraction of its
+# confidence so a phone briefly off WiFi reads "probably home", not "away".
+GRACE_PRIMARY_WEIGHT = 0.4
 
 
 class PresenceResolver:
@@ -41,6 +44,8 @@ class PresenceResolver:
         self._states: dict[str, PresenceState] = {}
         # person_id -> first time all their devices were gone
         self._away_since: dict[str, float] = {}
+        # device_id -> last time we saw it online (for grace-period partial credit)
+        self._last_seen_online: dict[str, float] = {}
 
     def resolve(self, devices: list[NetworkDevice], emit) -> list[PresenceState]:
         t = now()
@@ -56,9 +61,13 @@ class PresenceResolver:
             evidence: list[PresenceEvidence] = []
             score = 0.0
             primary_online = False
+            primary_in_grace = False
             for did in primary:
                 dev = by_id.get(did)
-                if dev and dev.is_online:
+                # a device that is ignored or not a presence candidate must not
+                # count toward its owner's presence (guest phones, IoT, etc.).
+                if dev and dev.is_online and not dev.ignored:
+                    self._last_seen_online[did] = t
                     primary_online = True
                     on_wifi = bool(dev.interfaces and dev.interfaces[0].connection_type == "wifi")
                     evidence.append(PresenceEvidence(
@@ -67,10 +76,20 @@ class PresenceResolver:
                         weight=PRIMARY_WEIGHT,
                     ))
                     score += PRIMARY_WEIGHT
+                else:
+                    # recently-seen primary device → partial credit during grace.
+                    last = self._last_seen_online.get(did)
+                    if last is not None and (t - last) < self.settings.presence_away_grace_seconds:
+                        primary_in_grace = True
+                        evidence.append(PresenceEvidence(
+                            device_id=did, reason="primary device recently seen",
+                            weight=GRACE_PRIMARY_WEIGHT))
+                        score += GRACE_PRIMARY_WEIGHT
             any_supporting = False
             for did in supporting:
                 dev = by_id.get(did)
-                if dev and dev.is_online:
+                if dev and dev.is_online and not dev.ignored:
+                    self._last_seen_online[did] = t
                     any_supporting = True
                     evidence.append(PresenceEvidence(
                         device_id=did, reason="supporting device online",
@@ -78,13 +97,12 @@ class PresenceResolver:
                     score += SUPPORTING_WEIGHT
 
             confidence = min(score, 1.0)
-            any_online = primary_online or any_supporting
 
             # Determine status with the longer away-grace debounce.
             if primary_online:
                 status = "home"
                 self._away_since.pop(pid, None)
-            elif any_supporting:
+            elif any_supporting or primary_in_grace:
                 status = "probably_home"
                 self._away_since.pop(pid, None)
             else:
@@ -107,19 +125,25 @@ class PresenceResolver:
                 last_changed_at=prev.last_changed_at if prev else t,
             )
 
-            # Transition events on a meaningful home<->away change.
-            prev_home = prev and prev.status in ("home", "probably_home")
-            now_home = status in ("home", "probably_home")
-            if prev is not None and prev_home != now_home:
+            # Transition events: only when the status string actually changes, so
+            # repeated polls in a steady state never re-emit. The strong home/away
+            # transitions are success/info; the in-between probably_* are quieter.
+            if prev is not None and prev.status != status:
                 state.last_changed_at = t
-                if now_home:
+                if status == "home":
                     state.last_arrived_at = t
                     emit(EventType.PRESENCE_PERSON_ARRIVED.value, "success",
                          f"{state.display_name} is thuisgekomen", None, pid)
-                else:
+                elif status == "away":
                     state.last_left_at = t
                     emit(EventType.PRESENCE_PERSON_LEFT.value, "info",
                          f"{state.display_name} is vertrokken", None, pid)
+                elif status == "probably_home":
+                    emit(EventType.PRESENCE_PERSON_PROBABLY_HOME.value, "info",
+                         f"{state.display_name} is waarschijnlijk thuis", None, pid)
+                elif status == "probably_away":
+                    emit(EventType.PRESENCE_PERSON_PROBABLY_AWAY.value, "info",
+                         f"{state.display_name} is waarschijnlijk weg", None, pid)
 
             self._states[pid] = state
             out.append(state)

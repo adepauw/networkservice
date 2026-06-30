@@ -50,9 +50,13 @@ All endpoints are reached through the CatOS app proxy as `/svc/network/...`.
 | --- | --- | --- |
 | GET | `/health` | liveness + per-source status + router/internet/DNS reachability |
 | GET | `/summary` | compact dashboard rollup (counts, presence, internet/router/WiFi, alerts, top traffic) |
-| GET | `/devices` | device inventory; filters: `online`, `known`, `type`, `role` |
-| GET | `/devices/{id}` | one device |
-| PATCH | `/devices/{id}` | safe user metadata only (name/type/role/trust/owner/tags/notes/presence/automation) |
+| GET | `/devices` | device inventory; filters: `online`, `known`, `ignored`, `type`, `role` |
+| GET | `/devices/{id}` | **device detail**: device + interfaces + recent events + recent metrics + presence usage + source attribution |
+| PATCH | `/devices/{id}` | safe user metadata only (name/type/role/trust/owner/tags/notes/presence/automation/ignored/is_known) |
+| POST | `/devices/{id}/mark-known` | classify as known (trusted inventory) |
+| POST | `/devices/{id}/mark-guest` | classify as a guest device |
+| POST | `/devices/{id}/ignore` | ignore the device — no more unknown-device alerts |
+| POST | `/devices/{id}/assign-owner` | assign an owner (`{"owner": "..."}`) |
 | POST | `/devices/{id}/wake` | Wake-on-LAN — **known/trusted devices with a MAC only** |
 | GET | `/events` | recent events; filters: `severity`, `type`, `device_id`, `unresolved` |
 | GET | `/events/stream` | **SSE** live event stream |
@@ -62,8 +66,12 @@ All endpoints are reached through the CatOS app proxy as `/svc/network/...`.
 | GET | `/metrics/recent` | recent metric samples for charts; optional `type` filter |
 
 `PATCH /devices/{id}` rejects any field that isn't user-owned (source-derived
-state like `ip`, `is_online`, `vendor` is never writable). Metadata is keyed by
-MAC and persisted in SQLite, so it survives IP/hostname churn and restarts.
+state like `ip`, `is_online`, `vendor` is never writable) and validates enum
+fields (`device_type`/`role`/`trust_level`) with a 422 on a bad value. The
+convenience endpoints funnel through the same validation/persistence path.
+Metadata is keyed by MAC and persisted in SQLite, so it survives IP/hostname
+churn and restarts. An **ignored** device stays visible (grouped under
+*Genegeerd*) but never raises an unknown-device alert.
 
 ## Run it
 
@@ -94,7 +102,10 @@ NETWORK_DB_PATH=./data/test.db python -m pytest -q
 
 Covered: MAC-based identity & merge (IP change doesn't duplicate a device),
 user-metadata survival, offline grace, unknown-device first-seen alerting,
-presence debounce (no instant flip to away), the defensive threat detectors, and
+ignored/known devices raising **no** unknown-device alert, `PATCH` rejecting
+source-owned/invalid fields, the convenience endpoints, device-detail shape
+(events + interfaces), presence debounce (no instant flip to away), presence
+events firing only on a real status change, the defensive threat detectors, and
 an end-to-end API smoke test in mock mode.
 
 ## Configuration

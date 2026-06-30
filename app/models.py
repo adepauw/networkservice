@@ -65,6 +65,7 @@ class EventType(str, Enum):
     DEVICE_MAC_CONFLICT = "device.macConflict"
     DEVICE_VENDOR_CHANGED = "device.vendorChanged"
     DEVICE_UNKNOWN_JOINED = "device.unknownJoined"
+    DEVICE_RANDOMIZED_MAC_SUSPECTED = "device.randomizedMacSuspected"
     WIFI_SIGNAL_POOR = "wifi.signalPoor"
     WIFI_RECONNECTED = "wifi.reconnected"
     INTERNET_ONLINE = "internet.online"
@@ -77,6 +78,8 @@ class EventType(str, Enum):
     VPN_PEER_DISCONNECTED = "vpn.peerDisconnected"
     PRESENCE_PERSON_ARRIVED = "presence.personArrived"
     PRESENCE_PERSON_LEFT = "presence.personLeft"
+    PRESENCE_PERSON_PROBABLY_HOME = "presence.personProbablyHome"
+    PRESENCE_PERSON_PROBABLY_AWAY = "presence.personProbablyAway"
     SOURCE_DEGRADED = "source.degraded"
     SOURCE_RECOVERED = "source.recovered"
     # --- defensive threat detection (detection only, never offence) ----------
@@ -121,6 +124,10 @@ class NetworkDevice(BaseModel):
     owner: Optional[str] = None
     is_known: bool = False
     is_online: bool = False
+    # user has explicitly told us to stop caring about this device. ignored
+    # devices never raise unknown-device alerts and drop out of the "unknown"
+    # counts, but stay visible (under "Genegeerd") so the user can un-ignore.
+    ignored: bool = False
     first_seen_at: float = Field(default_factory=now)
     last_seen_at: float = Field(default_factory=now)
     last_changed_at: float = Field(default_factory=now)
@@ -142,6 +149,7 @@ class NetworkDevice(BaseModel):
 USER_EDITABLE_FIELDS = {
     "display_name", "role", "trust_level", "owner", "tags", "notes",
     "presence_candidate", "automation_candidate", "device_type",
+    "ignored", "is_known",
 }
 
 
@@ -158,6 +166,9 @@ class DeviceMetadata(BaseModel):
     notes: Optional[str] = None
     presence_candidate: bool = False
     automation_candidate: bool = False
+    ignored: bool = False
+    # None = derive is_known from trust_level; True/False = explicit override.
+    is_known: Optional[bool] = None
     first_seen_at: Optional[float] = None
     updated_at: float = Field(default_factory=now)
 
