@@ -64,6 +64,14 @@ All endpoints are reached through the CatOS app proxy as `/svc/network/...`.
 | POST | `/alerts/{id}/ack` | acknowledge/resolve an alert |
 | GET | `/presence` | person-level derived presence (home/away/probably_*) with confidence + evidence |
 | GET | `/metrics/recent` | recent metric samples for charts; optional `type` filter |
+| GET | `/internet/status` | current internet/WAN health verdict (status/quality + latency/jitter/loss/DNS) |
+| GET | `/internet/history` | recent internet health samples; `limit`, `since` |
+| GET | `/diagnostics/internet` | verbose internet diagnostics: snapshot + thresholds + per-source status |
+| GET | `/wifi/summary` | WiFi quality rollup (status, weak/critical counts, bands, recommendations) |
+| GET | `/wifi/clients` | per-device WiFi quality (worst signal first) |
+| GET | `/wifi/clients/{id}` | one WiFi client's quality |
+| GET | `/wifi/history` | recent aggregate WiFi samples; `limit`, `since` |
+| GET | `/health/history` | rolling network-health samples for charts; `limit`, `since` |
 
 `PATCH /devices/{id}` rejects any field that isn't user-owned (source-derived
 state like `ip`, `is_online`, `vendor` is never writable) and validates enum
@@ -124,7 +132,19 @@ and persons come from `NETWORK_CONFIG` (a JSON file, **gitignored** under
 | `UNKNOWN_ALERT_COOLDOWN` | `3600` | per-MAC cooldown for the unknown-device alert |
 | `EVENT_DEDUPE_COOLDOWN` | `600` | generic per-event dedupe window |
 | `POOR_RSSI_DBM` / `POOR_RSSI_SAMPLES` | `-75` / `3` | poor-WiFi threshold + consecutive samples |
-| `INTERNET_FAIL_SAMPLES` | `3` | failed checks before `internet.offline` |
+| `INTERNET_FAIL_SAMPLES` | `3` | failed checks before `internet.offline` (legacy) |
+| `INTERNET_CHECK_ENABLED` | `1` | run the active internet diagnostic pipeline |
+| `INTERNET_FAILURE_THRESHOLD` / `INTERNET_RECOVERY_THRESHOLD` | `3` / `2` | offline / recovered debounce |
+| `DNS_FAILURE_THRESHOLD` | `2` | DNS failures before `dns.degraded` |
+| `LATENCY_DEGRADED_MS` / `LATENCY_FAILURE_SAMPLES` | `100` / `3` | latency-high threshold + samples |
+| `JITTER_DEGRADED_MS` | `50` | jitter-high threshold |
+| `PACKET_LOSS_DEGRADED_PERCENT` / `PACKET_LOSS_FAILURE_SAMPLES` | `5` / `3` | packet-loss threshold + samples |
+| `WIFI_CRITICAL_RSSI_DBM` | `-82` | critical-WiFi boundary (below = critical) |
+| `WIFI_POOR_SAMPLE_THRESHOLD` / `WIFI_RECOVERY_SAMPLE_THRESHOLD` | `3` / `2` | WiFi poor / recovered debounce |
+| `HEALTH_HISTORY_LIMIT` | `1000` | health-history ring-buffer size |
+
+The full `diagnostics` block can also live in `config.json` (see
+`config/config.example.json`) — those keys override the env defaults.
 | `GLINET_PASSWORD` | — | router password, referenced by name from config (**never commit**) |
 | `WOL_ENABLED` / `WOL_BROADCAST` | `1` / `255.255.255.255` | Wake-on-LAN |
 
