@@ -94,6 +94,30 @@ class Settings:
     internet_check_hosts: tuple[str, ...] = ("1.1.1.1", "8.8.8.8")
     dns_check_host: str = os.environ.get("DNS_CHECK_HOST", "cloudflare.com")
 
+    # --- Sprint 2: diagnostic thresholds (Internet Health + WiFi Coach) -------
+    # All overridable via the config file's "diagnostics" object or env. Kept
+    # conservative: a major alert needs repeated failures, recovery needs repeated
+    # healthy samples, so the network has to be genuinely (un)healthy to flip.
+    internet_check_enabled: bool = _bool("INTERNET_CHECK_ENABLED", True)
+    internet_failure_threshold: int = _int("INTERNET_FAILURE_THRESHOLD", 3)
+    internet_recovery_threshold: int = _int("INTERNET_RECOVERY_THRESHOLD", 2)
+    dns_failure_threshold: int = _int("DNS_FAILURE_THRESHOLD", 2)
+    dns_recovery_threshold: int = _int("DNS_RECOVERY_THRESHOLD", 2)
+    latency_degraded_ms: float = _float("LATENCY_DEGRADED_MS", 100.0)
+    latency_failure_samples: int = _int("LATENCY_FAILURE_SAMPLES", 3)
+    jitter_degraded_ms: float = _float("JITTER_DEGRADED_MS", 50.0)
+    packet_loss_degraded_percent: float = _float("PACKET_LOSS_DEGRADED_PERCENT", 5.0)
+    packet_loss_failure_samples: int = _int("PACKET_LOSS_FAILURE_SAMPLES", 3)
+    # number of latency probes per poll (also the packet-loss/jitter sample set).
+    latency_probe_count: int = _int("LATENCY_PROBE_COUNT", 4)
+    # WiFi quality buckets (dBm). poor <= poor_rssi_dbm; critical <= critical.
+    wifi_critical_rssi_dbm: int = _int("WIFI_CRITICAL_RSSI_DBM", -82)
+    wifi_poor_sample_threshold: int = _int("WIFI_POOR_SAMPLE_THRESHOLD", 3)
+    wifi_recovery_sample_threshold: int = _int("WIFI_RECOVERY_SAMPLE_THRESHOLD", 2)
+    # raise wifi.tooManyWeakClients once this many clients are weak/critical.
+    wifi_too_many_weak_clients: int = _int("WIFI_TOO_MANY_WEAK_CLIENTS", 3)
+    health_history_limit: int = _int("HEALTH_HISTORY_LIMIT", 1000)
+
     request_timeout: float = _float("NETWORK_TIMEOUT", 5.0)
 
     # --- Storage --------------------------------------------------------------
@@ -186,6 +210,31 @@ def load_settings() -> Settings:
     ):
         if key in file_cfg:
             overrides[key] = int(file_cfg[key])
+
+    # diagnostics thresholds (Sprint 2). file keys mirror the Settings field names
+    # (minus the "internet_"/"wifi_" prefixes where the example uses short names),
+    # so map the documented config block onto the dataclass fields.
+    diag = file_cfg.get("diagnostics", {})
+    _diag_map = {
+        "internet_check_enabled": ("internet_check_enabled", bool),
+        "internet_failure_threshold": ("internet_failure_threshold", int),
+        "internet_recovery_threshold": ("internet_recovery_threshold", int),
+        "dns_failure_threshold": ("dns_failure_threshold", int),
+        "dns_recovery_threshold": ("dns_recovery_threshold", int),
+        "latency_degraded_ms": ("latency_degraded_ms", float),
+        "latency_failure_samples": ("latency_failure_samples", int),
+        "jitter_degraded_ms": ("jitter_degraded_ms", float),
+        "packet_loss_degraded_percent": ("packet_loss_degraded_percent", float),
+        "packet_loss_failure_samples": ("packet_loss_failure_samples", int),
+        "wifi_poor_rssi_dbm": ("poor_rssi_dbm", int),
+        "wifi_critical_rssi_dbm": ("wifi_critical_rssi_dbm", int),
+        "wifi_poor_sample_threshold": ("wifi_poor_sample_threshold", int),
+        "wifi_recovery_sample_threshold": ("wifi_recovery_sample_threshold", int),
+        "health_history_limit": ("health_history_limit", int),
+    }
+    for file_key, (field_name, caster) in _diag_map.items():
+        if file_key in diag:
+            overrides[field_name] = caster(diag[file_key])
 
     return Settings(
         **overrides,

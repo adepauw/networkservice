@@ -31,6 +31,40 @@ def test_api_shapes():
         assert len(metrics) > 0
 
 
+def test_summary_includes_internet_and_wifi():
+    with TestClient(app) as client:
+        s = client.get("/summary").json()
+        assert s["internet"]["status"] in ("online", "degraded", "offline", "unknown")
+        assert "quality" in s["internet"]
+        assert s["wifi"]["status"] in ("good", "fair", "poor", "critical", "unknown")
+        assert isinstance(s["wifi"]["weak_client_count"], int)
+        assert isinstance(s["network_health_score"], int)
+        assert "trends" in s
+
+
+def test_diagnostic_endpoints():
+    with TestClient(app) as client:
+        assert client.get("/internet/status").json()["internet"]["status"]
+        diag = client.get("/diagnostics/internet").json()
+        assert "thresholds" in diag and "sources" in diag
+        wifi = client.get("/wifi/summary").json()["wifi"]
+        assert "status" in wifi and "recommendations" in wifi
+        clients = client.get("/wifi/clients").json()["clients"]
+        assert isinstance(clients, list)
+        history = client.get("/health/history").json()
+        assert "samples" in history and history["count"] >= 1
+
+
+def test_health_history_ring_buffer_limit():
+    from app.models import NetworkHealthSample
+    from app.store import LiveStore
+    live = LiveStore(10, 10, history_limit=5)
+    for i in range(12):
+        live.append_health_sample(NetworkHealthSample(id=f"hs_{i}"))
+    assert len(live.health_history) == 5
+    assert len(live.health_samples(limit=3)) == 3
+
+
 def test_patch_persists_metadata():
     with TestClient(app) as client:
         devices = client.get("/devices").json()["devices"]

@@ -26,13 +26,14 @@ import uuid
 
 from .config import Settings
 from .events import broker
-from .health import check_dns, check_internet
-from .models import EventType, NetworkEvent, now
+from .models import EventType, NetworkEvent, NetworkHealthSample, now
+from .services.internet import InternetHealthMonitor
 from .services.inventory import NetworkInventoryService
 from .services.metrics import MetricsService
 from .services.presence import PresenceResolver
 from .services.security import SecurityMonitor
 from .services.summary import build_summary
+from .services.wifi import WifiQualityCoach
 from .store import LiveStore, MetadataStore
 
 log = logging.getLogger("networkservice.engine")
@@ -43,15 +44,16 @@ class NetworkEngine:
         self.settings = settings
         self.adapters = adapters
         self.metadata = MetadataStore(settings.db_path)
-        self.live = LiveStore(settings.event_buffer_size, settings.metric_buffer_size)
+        self.live = LiveStore(settings.event_buffer_size, settings.metric_buffer_size,
+                              settings.health_history_limit)
         self.inventory = NetworkInventoryService(settings, self.live, self.metadata)
         self.metrics = MetricsService(settings, self.live)
         self.presence = PresenceResolver(settings, settings.persons)
         self.security = SecurityMonitor(settings)
+        self.internet = InternetHealthMonitor(settings)
+        self.wifi = WifiQualityCoach(settings)
         self._cooldowns: dict[str, float] = {}
         self._unknown_cooldowns: dict[str, float] = {}
-        self._internet_fail_streak = 0
-        self._dns_fail_streak = 0
         self._task: asyncio.Task | None = None
 
     @property
@@ -139,10 +141,11 @@ class NetworkEngine:
         reconciled = self.inventory.reconcile(merged, self._emit_inventory)
         self.live.set_devices(reconciled)
 
-        # 4: metrics + wifi
+        # 4: metrics + wifi quality
         for snap in snapshots:
             self.metrics.record(snap.metrics)
-        wifi = self.metrics.evaluate_wifi(reconciled, self._emit_inventory)
+        wifi = self.wifi.evaluate(reconciled, self._emit_inventory)
+        self.live.wifi_quality = wifi
 
         # 5: presence
         self.presence.resolve(reconciled, self._emit_presence)
@@ -150,11 +153,16 @@ class NetworkEngine:
         # 6: defensive security
         self.security.inspect(snapshots, reconciled, self._emit_inventory)
 
-        # 7: router + internet + dns health
+        # 7: internet health monitor (router + dns + external + latency/jitter/loss)
         await self._update_connectivity(snapshots)
 
-        # 8: summary + source health + push
-        self.live.summary = build_summary(self.live, self.metrics, self.presence, wifi)
+        # 8: record a health-history sample
+        self._record_health_sample(reconciled)
+
+        # 9: summary + source health + push
+        self.live.summary = build_summary(
+            self.live, self.metrics, self.presence,
+            self.live.internet_health, wifi, self.internet.last_outage_at)
         self.live.last_poll_at = now()
         self.live.last_error = None
         broker.publish("changed", {"reason": "poll"})
@@ -166,51 +174,47 @@ class NetworkEngine:
     def _emit_presence(self, type_, severity, title, message, person_id):
         self._emit(type_, severity, title, message, person_id, {})
 
+    def _emit_health(self, type_, severity, title, message, metadata):
+        self._emit(type_, severity, title, message, None, metadata)
+
     async def _update_connectivity(self, snapshots: list) -> None:
-        # router
-        router = next((s.router_online for s in snapshots if s.router_online is not None), None)
-        self.live.router_online = router
+        # gather source-reported hints; the monitor probes for real only when a
+        # source doesn't already report a value (keeps mock mode network-free).
+        hints = {
+            "router_online": next((s.router_online for s in snapshots if s.router_online is not None), None),
+            "internet_online": next((s.internet_online for s in snapshots if s.internet_online is not None), None),
+            "dns_online": next((s.dns_online for s in snapshots if s.dns_online is not None), None),
+            "latency_ms": self.metrics.latest("internet.latencyMs"),
+            "wan_ip": next((s.raw.get("wan_ip") for s in snapshots if s.raw.get("wan_ip")), None),
+            "source": next((s.source_id for s in snapshots if s.internet_online is not None), None),
+        }
+        health = await self.internet.evaluate(hints, self._emit_health, self._resolve_open)
+        self.live.internet_health = health
+        # keep the legacy flat flags in sync for /health + summary back-compat
+        self.live.router_online = health.router_reachable
+        self.live.internet_online = (
+            True if health.status == "online" else
+            False if health.status == "offline" else self.live.internet_online)
+        self.live.dns_online = health.dns_ok
 
-        # internet: prefer a source that reports it, else do a real check
-        reported = next((s.internet_online for s in snapshots if s.internet_online is not None), None)
-        online = reported if reported is not None else await check_internet(
-            self.settings.internet_check_hosts, self.settings.request_timeout)
-        self._eval_internet(online)
-
-        # dns
-        dns_reported = next((s.dns_online for s in snapshots if s.dns_online is not None), None)
-        dns_ok = dns_reported if dns_reported is not None else await check_dns(
-            self.settings.dns_check_host, self.settings.request_timeout)
-        self._eval_dns(dns_ok)
-
-    def _eval_internet(self, online: bool) -> None:
-        prev = self.live.internet_online
-        if online:
-            self._internet_fail_streak = 0
-            if prev is False:
-                self._resolve_open(f"{EventType.INTERNET_OFFLINE.value}:internet")
-                self._emit(EventType.INTERNET_ONLINE.value, "success",
-                           "Internet is hersteld", None, None, {})
-            self.live.internet_online = True
-        else:
-            self._internet_fail_streak += 1
-            if self._internet_fail_streak >= self.settings.internet_fail_samples:
-                if prev is not False:
-                    self._emit(EventType.INTERNET_OFFLINE.value, "critical",
-                               "Internet is offline",
-                               f"{self._internet_fail_streak} mislukte checks", None,
-                               {"mac": "internet"})
-                self.live.internet_online = False
-
-    def _eval_dns(self, ok: bool) -> None:
-        prev = self.live.dns_online
-        if ok:
-            self._dns_fail_streak = 0
-            self.live.dns_online = True
-        else:
-            self._dns_fail_streak += 1
-            if self._dns_fail_streak >= self.settings.internet_fail_samples:
-                if prev is not False:
-                    self._emit(EventType.DNS_DEGRADED.value, "warning",
-                               "DNS reageert niet", None, None, {"mac": "dns"})
-                self.live.dns_online = False
+    def _record_health_sample(self, devices: list) -> None:
+        h = self.live.internet_health
+        w = self.live.wifi_quality
+        online = [d for d in devices if d.is_online]
+        sample = NetworkHealthSample(
+            id=f"hs_{uuid.uuid4().hex[:10]}",
+            internet_status=h.status if h else "unknown",
+            internet_quality=h.quality if h else "unknown",
+            latency_ms=h.latency_ms if h else None,
+            jitter_ms=h.jitter_ms if h else None,
+            packet_loss_percent=h.packet_loss_percent if h else None,
+            dns_ok=h.dns_ok if h else None,
+            router_status="healthy" if self.live.router_online else (
+                "unknown" if self.live.router_online is None else "error"),
+            wifi_status=w.status if w else "unknown",
+            wifi_weak_client_count=w.weak_client_count if w else 0,
+            online_device_count=len(online),
+            unknown_device_count=sum(1 for d in online if not d.is_known and not d.ignored),
+            source_statuses={s.id: s.status for s in self.source_descriptions()},
+        )
+        self.live.append_health_sample(sample)

@@ -18,6 +18,14 @@ Endpoints (mounted under BASE_PATH when set, reached via /svc/network/... in Cat
     POST /alerts/{id}/ack        acknowledge/resolve an alert
     GET  /presence               person-level derived presence
     GET  /metrics/recent         recent metric samples for charts
+    GET  /internet/status        current internet/WAN health verdict
+    GET  /internet/history       recent internet health samples
+    GET  /diagnostics/internet   verbose internet diagnostics + thresholds
+    GET  /wifi/summary           WiFi quality rollup
+    GET  /wifi/clients           per-device WiFi quality
+    GET  /wifi/clients/{id}      one WiFi client's quality
+    GET  /wifi/history           recent aggregate WiFi samples
+    GET  /health/history         rolling network-health samples for charts
 
 A background poller (see polling.NetworkEngine) refreshes every POLL_INTERVAL
 seconds. Without a real source configured it runs in mock mode so the API and the

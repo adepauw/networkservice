@@ -7,6 +7,23 @@
   "unknown_device_alert_cooldown_seconds": 3600,
   "event_dedupe_cooldown_seconds": 600,
 
+  "diagnostics": {
+    "internet_check_enabled": true,
+    "internet_failure_threshold": 3,
+    "internet_recovery_threshold": 2,
+    "dns_failure_threshold": 2,
+    "latency_degraded_ms": 100,
+    "latency_failure_samples": 3,
+    "jitter_degraded_ms": 50,
+    "packet_loss_degraded_percent": 5,
+    "packet_loss_failure_samples": 3,
+    "wifi_poor_rssi_dbm": -75,
+    "wifi_critical_rssi_dbm": -82,
+    "wifi_poor_sample_threshold": 3,
+    "wifi_recovery_sample_threshold": 2,
+    "health_history_limit": 1000
+  },
+
   "sources": [
     {
       "id": "flint2",

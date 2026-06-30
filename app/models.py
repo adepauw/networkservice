@@ -48,6 +48,12 @@ Severity = Literal["info", "success", "warning", "critical"]
 
 PresenceStatus = Literal["home", "away", "probably_home", "probably_away", "unknown"]
 
+# diagnostics enumerations (Sprint 2)
+InternetStatus = Literal["online", "degraded", "offline", "unknown"]
+HealthQuality = Literal["excellent", "good", "fair", "poor", "unknown"]
+WifiStatus = Literal["good", "fair", "poor", "critical", "unknown"]
+ClientQuality = Literal["excellent", "good", "fair", "poor", "critical", "unknown"]
+
 SourceType = Literal[
     "glinet", "openwrt", "adguard", "pihole", "tailscale", "phobos", "mdns",
     "ssdp", "manual", "mock", "unknown",
@@ -67,11 +73,23 @@ class EventType(str, Enum):
     DEVICE_UNKNOWN_JOINED = "device.unknownJoined"
     DEVICE_RANDOMIZED_MAC_SUSPECTED = "device.randomizedMacSuspected"
     WIFI_SIGNAL_POOR = "wifi.signalPoor"
+    WIFI_SIGNAL_CRITICAL = "wifi.signalCritical"
+    WIFI_SIGNAL_RECOVERED = "wifi.signalRecovered"
+    WIFI_TOO_MANY_WEAK_CLIENTS = "wifi.tooManyWeakClients"
+    WIFI_CLIENT_QUALITY_CHANGED = "wifi.clientQualityChanged"
     WIFI_RECONNECTED = "wifi.reconnected"
     INTERNET_ONLINE = "internet.online"
     INTERNET_OFFLINE = "internet.offline"
     INTERNET_DEGRADED = "internet.degraded"
+    INTERNET_RECOVERED = "internet.recovered"
+    INTERNET_LATENCY_HIGH = "internet.latencyHigh"
+    INTERNET_PACKET_LOSS_HIGH = "internet.packetLossHigh"
+    INTERNET_JITTER_HIGH = "internet.jitterHigh"
     DNS_DEGRADED = "dns.degraded"
+    DNS_RECOVERED = "dns.recovered"
+    WAN_IP_CHANGED = "wan.ipChanged"
+    ROUTER_UNREACHABLE = "router.unreachable"
+    ROUTER_RECOVERED = "router.recovered"
     ROUTER_REBOOTED = "router.rebooted"
     ROUTER_CONFIG_CHANGED = "router.configChanged"
     VPN_PEER_CONNECTED = "vpn.peerConnected"
@@ -225,6 +243,88 @@ class PresenceState(BaseModel):
     last_left_at: Optional[float] = None
     last_changed_at: float = Field(default_factory=now)
     evidence: list[PresenceEvidence] = Field(default_factory=list)
+
+
+class InternetHealthStatus(BaseModel):
+    """Current internet/WAN health snapshot — the output of the diagnostic pipeline.
+
+    Built from a handful of safe, low-rate checks (gateway reachability, DNS
+    resolution, external HTTPS reachability + latency/jitter/loss). Any optional
+    check that can't run is simply omitted; one missing check never fails the whole
+    status. ``degraded_reasons`` explains *why* the verdict isn't ``online``.
+    """
+
+    status: InternetStatus = "unknown"
+    quality: HealthQuality = "unknown"
+    checked_at: float = Field(default_factory=now)
+    router_reachable: Optional[bool] = None
+    gateway_reachable: Optional[bool] = None
+    dns_ok: Optional[bool] = None
+    external_reachable: Optional[bool] = None
+    latency_ms: Optional[float] = None
+    jitter_ms: Optional[float] = None
+    packet_loss_percent: Optional[float] = None
+    wan_ip: Optional[str] = None
+    wan_ip_changed: bool = False
+    ipv6_available: Optional[bool] = None
+    degraded_reasons: list[str] = Field(default_factory=list)
+    source: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WifiClientQuality(BaseModel):
+    """Per-device WiFi quality — RSSI bucketed into an actionable verdict."""
+
+    device_id: str
+    name: str
+    quality: ClientQuality = "unknown"
+    rssi: Optional[int] = None
+    signal_quality: Optional[int] = None
+    band: Band = "unknown"
+    channel: Optional[int] = None
+    ssid: Optional[str] = None
+    tx_rate_mbps: Optional[float] = None
+    rx_rate_mbps: Optional[float] = None
+    last_seen_at: Optional[float] = None
+    role: DeviceRole = "unknown"
+    recommendation: Optional[str] = None
+
+
+class WifiQualitySummary(BaseModel):
+    """Compact, CatOS-friendly rollup of WiFi quality across all clients."""
+
+    status: WifiStatus = "unknown"
+    quality: HealthQuality = "unknown"
+    checked_at: float = Field(default_factory=now)
+    client_count: int = 0
+    weak_client_count: int = 0
+    critical_client_count: int = 0
+    bands: dict[str, int] = Field(default_factory=dict)
+    channels: dict[str, int] = Field(default_factory=dict)
+    worst_clients: list[WifiClientQuality] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class NetworkHealthSample(BaseModel):
+    """One row in the rolling health-history ring buffer — a flattened snapshot
+    of the most useful diagnostic signals at a point in time, shaped for sparklines."""
+
+    id: str
+    sampled_at: float = Field(default_factory=now)
+    internet_status: InternetStatus = "unknown"
+    internet_quality: HealthQuality = "unknown"
+    latency_ms: Optional[float] = None
+    jitter_ms: Optional[float] = None
+    packet_loss_percent: Optional[float] = None
+    dns_ok: Optional[bool] = None
+    router_status: str = "unknown"
+    wifi_status: WifiStatus = "unknown"
+    wifi_weak_client_count: int = 0
+    online_device_count: int = 0
+    unknown_device_count: int = 0
+    source_statuses: dict[str, str] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class NetworkSource(BaseModel):

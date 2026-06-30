@@ -27,11 +27,14 @@ from typing import Optional
 
 from .models import (
     DeviceMetadata,
+    InternetHealthStatus,
     NetworkDevice,
     NetworkEvent,
+    NetworkHealthSample,
     NetworkMetric,
     NetworkSource,
     PresenceState,
+    WifiQualitySummary,
 )
 
 log = logging.getLogger("networkservice.store")
@@ -141,7 +144,7 @@ class MetadataStore:
 class LiveStore:
     """In-memory current snapshot + bounded event/metric ring buffers."""
 
-    def __init__(self, event_buffer: int, metric_buffer: int) -> None:
+    def __init__(self, event_buffer: int, metric_buffer: int, history_limit: int = 1000) -> None:
         self.devices: dict[str, NetworkDevice] = {}
         self.presence: dict[str, PresenceState] = {}
         self.sources: dict[str, NetworkSource] = {}
@@ -154,6 +157,11 @@ class LiveStore:
         self.dns_online: Optional[bool] = None
         self.last_poll_at: Optional[float] = None
         self.last_error: Optional[str] = None
+        # Sprint 2 diagnostics: latest internet/WiFi verdicts + a rolling
+        # health-history ring buffer (bounded; in memory only).
+        self.internet_health: Optional[InternetHealthStatus] = None
+        self.wifi_quality: Optional[WifiQualitySummary] = None
+        self.health_history: deque[NetworkHealthSample] = deque(maxlen=history_limit)
 
     # --- devices --------------------------------------------------------------
     def set_devices(self, devices: list[NetworkDevice]) -> None:
@@ -189,6 +197,20 @@ class LiveStore:
         out: list[NetworkMetric] = []
         for m in self.metrics:
             out.append(m)
+            if len(out) >= limit:
+                break
+        return out
+
+    # --- health history -------------------------------------------------------
+    def append_health_sample(self, sample: NetworkHealthSample) -> None:
+        self.health_history.appendleft(sample)
+
+    def health_samples(self, limit: int = 200, since: float | None = None) -> list[NetworkHealthSample]:
+        out: list[NetworkHealthSample] = []
+        for s in self.health_history:
+            if since is not None and s.sampled_at < since:
+                break
+            out.append(s)
             if len(out) >= limit:
                 break
         return out
