@@ -17,7 +17,6 @@ import logging
 import os
 import random
 import time
-from typing import Any
 
 import httpx
 

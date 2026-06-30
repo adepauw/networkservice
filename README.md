@@ -57,7 +57,22 @@ All endpoints are reached through the CatOS app proxy as `/svc/network/...`.
 | POST | `/devices/{id}/mark-guest` | classify as a guest device |
 | POST | `/devices/{id}/ignore` | ignore the device — no more unknown-device alerts |
 | POST | `/devices/{id}/assign-owner` | assign an owner (`{"owner": "..."}`) |
-| POST | `/devices/{id}/wake` | Wake-on-LAN — **known/trusted devices with a MAC only** |
+| POST | `/devices/{id}/wake` | Wake-on-LAN — eligible devices only; returns a structured `WakeResult` |
+| GET | `/devices/{id}/wake/status` | Wake-on-LAN eligibility (`can_wake` + Dutch `reason`) |
+| GET | `/traffic/summary` | compact traffic rollup: throughput + top download/upload devices + unusual hints |
+| GET | `/traffic/devices` | per-device traffic stats (both directions) |
+| GET | `/traffic/devices/{id}` | one device's traffic stats |
+| GET | `/traffic/history` | recent traffic samples (`limit`, `since`) |
+| GET | `/dns/summary` | DNS protection rollup (counts, status, top devices/domains) |
+| GET | `/dns/devices` | per-device DNS stats |
+| GET | `/dns/devices/{id}` | one device's DNS stats |
+| GET | `/dns/blocked` | recent blocked-domain events |
+| GET | `/dns/history` | DNS history (empty until retained) |
+| GET | `/vpn/summary` | VPN rollup (status, peer/connected counts, per-source) |
+| GET | `/vpn/peers` | flat VPN peer list |
+| GET | `/vpn/peers/{id}` | one VPN peer |
+| GET | `/vpn/history` | VPN history (empty until retained) |
+| GET | `/topology` | simple grouped topology (groups + counts + router-star links) |
 | GET | `/events` | recent events; filters: `severity`, `type`, `device_id`, `unresolved` |
 | GET | `/events/stream` | **SSE** live event stream |
 | GET | `/alerts` | open warning/critical events |
@@ -147,6 +162,16 @@ The full `diagnostics` block can also live in `config.json` (see
 `config/config.example.json`) — those keys override the env defaults.
 | `GLINET_PASSWORD` | — | router password, referenced by name from config (**never commit**) |
 | `WOL_ENABLED` / `WOL_BROADCAST` | `1` / `255.255.255.255` | Wake-on-LAN |
+| `TRAFFIC_ENABLED` / `TRAFFIC_HIGH_USAGE_BPS` / `TRAFFIC_UNUSUAL_UPLOAD_BPS` | `1` / `50000000` / `10000000` | traffic insights (Sprint 3) |
+| `DNS_ENABLED` / `DNS_PRIVACY_MODE` | `0` / `summary` | DNS protection seam (Sprint 3) |
+| `VPN_ENABLED` / `VPN_PEER_STALE_SECONDS` | `0` / `600` | VPN seam (Sprint 3) |
+| `TOPOLOGY_ENABLED` | `1` | grouped topology (Sprint 3) |
+
+Sprint 3 (Wake-on-LAN polish, traffic insights, DNS/VPN source adapters, topology)
+is documented in `docs/SPRINT3.md`; its `wake_on_lan` / `traffic` / `dns` / `vpn` /
+`topology` config blocks live in `config/config.example.json`. DNS/VPN sources are
+disabled by default — the API returns honest "not configured" states until you add
+an `adguard`/`pihole`/`tailscale`/`wireguard` source (mock-capable without creds).
 
 **Secrets:** never inline a password in `config.json`. Reference an env-var name
 (`options.password_env`) and supply it via the environment. `config/config.json`

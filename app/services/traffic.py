@@ -21,7 +21,6 @@ from ..models import (
     TrafficDeviceStats,
     TrafficSample,
     TrafficSummary,
-    now,
 )
 from ..store import LiveStore
 
