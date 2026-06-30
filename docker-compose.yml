@@ -1,0 +1,42 @@
+# Standalone / LAN deployment for networkservice (CatOS Network Intelligence).
+#
+# host networking is used so the connectivity checks and (later) the OpenWrt/
+# GL.iNet adapters and Wake-on-LAN broadcasts can reach the LAN directly. If you
+# don't need WoL/raw LAN visibility you can switch to a published port instead.
+#
+# For the phobos homelab (behind NPM) use stacks/networkservice in the homelab repo.
+services:
+  networkservice:
+    build: .
+    image: networkservice:latest
+    container_name: networkservice
+    restart: unless-stopped
+    # host networking lets WoL broadcasts + LAN checks work without extra plumbing.
+    network_mode: host
+    environment:
+      TZ: ${TZ:-Europe/Brussels}
+      PORT: 8103
+      POLL_INTERVAL: ${POLL_INTERVAL:-30}
+      # Set NETWORK_MOCK=0 once a real source is configured in config/config.json.
+      NETWORK_MOCK: ${NETWORK_MOCK:-1}
+      NETWORK_CONFIG: /app/config/config.json
+      NETWORK_DB_PATH: /app/data/networkservice.db
+      # Router/API secrets are referenced by name from config.json and supplied here.
+      GLINET_PASSWORD: ${GLINET_PASSWORD:-}
+      WOL_BROADCAST: ${WOL_BROADCAST:-255.255.255.255}
+    volumes:
+      # config.json holds source definitions (gitignored — may contain secrets).
+      - ./config:/app/config
+      # SQLite holds the user-owned device metadata (known devices, names, trust).
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8103/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

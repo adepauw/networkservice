@@ -1,0 +1,190 @@
+# networkservice — CatOS Network Intelligence
+
+A Python/FastAPI domain service that gives CatOS a normalized, first-class view of
+the home network, next to Hue, Airco, Nuki, Doorbell, Power, Environment, Heating,
+Afval and Phobos. It answers questions like *who is home*, *which devices are
+online/unknown*, *is the internet healthy*, *which devices have poor WiFi*, and
+*did something suspicious just appear on my network* — and streams the events that
+drive CatOS notifications.
+
+It is **source-pluggable**. The first real source is a GL.iNet Flint 2
+(GL-MT6000) on OpenWrt firmware; AdGuard/Pi-hole, Tailscale, Phobos/hostservice,
+mDNS/SSDP discovery and others can be added as adapters later. Out of the box it
+runs in **mock mode** with a realistic household so the API and the CatOS Network
+page are useful immediately — no router credentials required.
+
+- **Port:** `8103` (next free slot after the other CatOS services, 8093–8102).
+- **Proxy name:** `network` → reached from the app as `/svc/network/...`.
+
+## What it does (and doesn't)
+
+This service is built for **visibility, diagnostics, automation and defensive
+security**: reading router/device state, passive observation, DHCP/ARP/neighbour
+tracking, WiFi association visibility, traffic counters, connectivity health,
+device inventory, alerting on unknown devices, firewall-summary, safe local
+discovery, optional low-rate LAN scanning (config-gated), and Wake-on-LAN for
+*known, trusted* devices.
+
+It also **detects and warns about attacks** without ever performing them. The
+`security` service watches for the fingerprints of common LAN/WiFi attacks and
+raises alerts:
+
+| Threat | What we detect | We do **not** |
+| --- | --- | --- |
+| Deauth / disassoc flood | spike in deauth frames reported by the WiFi source | transmit deauth frames |
+| Evil-twin / rogue AP | a nearby BSSID broadcasting *our* SSID that isn't a known AP | stand up a rogue AP |
+| ARP spoofing / MITM | an IP suddenly remapping to a new MAC | poison ARP / intercept traffic |
+| MAC spoofing | a trusted MAC appearing with a different fingerprint | spoof MACs |
+| Port-exposure change | a new inbound port opened on the firewall | scan/exploit |
+| Suspicious unknown device | an unknown device joining (escalated if it trips the above) | — |
+
+There is deliberately **no offensive capability** in this service: no deauth, no
+credential capture, no payload capture, no MITM, no exploit scanning. Detection
+and protection only.
+
+## API
+
+All endpoints are reached through the CatOS app proxy as `/svc/network/...`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/health` | liveness + per-source status + router/internet/DNS reachability |
+| GET | `/summary` | compact dashboard rollup (counts, presence, internet/router/WiFi, alerts, top traffic) |
+| GET | `/devices` | device inventory; filters: `online`, `known`, `type`, `role` |
+| GET | `/devices/{id}` | one device |
+| PATCH | `/devices/{id}` | safe user metadata only (name/type/role/trust/owner/tags/notes/presence/automation) |
+| POST | `/devices/{id}/wake` | Wake-on-LAN — **known/trusted devices with a MAC only** |
+| GET | `/events` | recent events; filters: `severity`, `type`, `device_id`, `unresolved` |
+| GET | `/events/stream` | **SSE** live event stream |
+| GET | `/alerts` | open warning/critical events |
+| POST | `/alerts/{id}/ack` | acknowledge/resolve an alert |
+| GET | `/presence` | person-level derived presence (home/away/probably_*) with confidence + evidence |
+| GET | `/metrics/recent` | recent metric samples for charts; optional `type` filter |
+
+`PATCH /devices/{id}` rejects any field that isn't user-owned (source-derived
+state like `ip`, `is_online`, `vendor` is never writable). Metadata is keyed by
+MAC and persisted in SQLite, so it survives IP/hostname churn and restarts.
+
+## Run it
+
+### Docker (homelab)
+
+```bash
+docker compose up -d --build
+curl -s localhost:8103/health | jq
+```
+
+Defaults to mock mode. To use a real router, drop a `config/config.json` (see
+below), set `NETWORK_MOCK=0`, and supply secrets via the environment.
+
+### Local dev
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8103
+```
+
+### Tests
+
+```bash
+pip install pytest
+NETWORK_DB_PATH=./data/test.db python -m pytest -q
+```
+
+Covered: MAC-based identity & merge (IP change doesn't duplicate a device),
+user-metadata survival, offline grace, unknown-device first-seen alerting,
+presence debounce (no instant flip to away), the defensive threat detectors, and
+an end-to-end API smoke test in mock mode.
+
+## Configuration
+
+Scalars come from the environment (sensible homelab defaults). Sources, secrets
+and persons come from `NETWORK_CONFIG` (a JSON file, **gitignored** under
+`config/`). Copy `config/config.example.json` to `config/config.json` and edit.
+
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `8103` | listen port |
+| `NETWORK_MOCK` | `1` | mock mode (auto-on if no real source is configured) |
+| `POLL_INTERVAL` | `30` | seconds between polls |
+| `OFFLINE_GRACE` | `300` | seconds a known device must be unseen before `device.offline` |
+| `PRESENCE_AWAY_GRACE` | `900` | seconds before a person flips to `away` (longer than device offline) |
+| `UNKNOWN_ALERT_COOLDOWN` | `3600` | per-MAC cooldown for the unknown-device alert |
+| `EVENT_DEDUPE_COOLDOWN` | `600` | generic per-event dedupe window |
+| `POOR_RSSI_DBM` / `POOR_RSSI_SAMPLES` | `-75` / `3` | poor-WiFi threshold + consecutive samples |
+| `INTERNET_FAIL_SAMPLES` | `3` | failed checks before `internet.offline` |
+| `GLINET_PASSWORD` | — | router password, referenced by name from config (**never commit**) |
+| `WOL_ENABLED` / `WOL_BROADCAST` | `1` / `255.255.255.255` | Wake-on-LAN |
+
+**Secrets:** never inline a password in `config.json`. Reference an env-var name
+(`options.password_env`) and supply it via the environment. `config/config.json`
+and `data/` are gitignored.
+
+## Architecture
+
+```
+sources/                 services/                 api/
+  base.py  (interface)     identity.py  (merge)      routes_summary.py
+  mock.py  (rich demo)     inventory.py (transitions)routes_devices.py
+  openwrt.py (skeleton)    presence.py  (people)     routes_events.py  (+ SSE)
+  glinet.py  (skeleton)    metrics.py   (wifi/traffic)routes_alerts.py
+                           security.py  (threat det.) routes_presence.py
+polling.py NetworkEngine   summary.py   (rollup)      routes_health.py
+  ties it together         wol.py       (WoL)         routes_metrics.py
+```
+
+Each **poll tick** (`NetworkEngine.poll_once`): poll sources → merge devices by
+identity → reconcile transitions → record metrics + WiFi health → resolve
+presence → run defensive security checks → check internet/DNS → rebuild summary →
+fan out SSE. Every event passes a dedupe/cooldown gate so a sustained condition
+emits once, not once per poll.
+
+**Storage:** live snapshot in memory; user device metadata in SQLite (keyed by
+MAC); events/metrics in bounded in-memory ring buffers.
+
+### Adding a source adapter
+
+1. Subclass `NetworkSourceAdapter` (see `sources/base.py`); implement `_poll()`
+   returning a normalized `SourceSnapshot`. Be fault-tolerant (never raise on a
+   transient upstream error) and capability-honest (report only what you actually
+   fetched).
+2. Register it in `sources/__init__.py._REGISTRY`.
+3. Add a source entry to `config.json` with its `type`, `base_url`,
+   `capabilities` and `options`.
+
+Capabilities are explicit strings: `dhcpLeases`, `arpTable`, `wifiAssociations`,
+`interfaceCounters`, `routerHealth`, `firewallSummary`, `dnsStats`, `vpnPeers`,
+`speedTest`, `wakeOnLan`. A source advertises what it supports; the engine fetches
+only those.
+
+## GL.iNet / OpenWrt integration status
+
+`sources/openwrt.py` and `sources/glinet.py` are **skeletons** with the
+normalization shape in place and the live device calls clearly marked `TODO`.
+Until they're wired, configuring them simply degrades the source (the engine keeps
+serving the last snapshot / mock data) — nothing breaks.
+
+To finish the live Flint 2 integration we still need:
+
+- GL.iNet firmware version (the JSON-RPC `/rpc` API differs between 3.x and 4.x).
+- Confirmation the `/rpc` API is enabled, and the admin password (via
+  `GLINET_PASSWORD`, never committed).
+- The exact client-list payload shape (field names for signal/band/vendor).
+- Whether WireGuard/Tailscale peer status is exposed via the API (for VPN events).
+- Optionally, OpenWrt `ubus` credentials if we read DHCP/ARP/iwinfo directly.
+
+## How CatOS consumes it
+
+- **App proxy:** `catos/server/src/index.ts` and `vite.config.ts` map
+  `network → 8103`, so the app calls `/svc/network/...`.
+- **Typed client:** `catos/src/services/networkClient.ts`.
+- **UI:** `catos/src/pages/NetworkPage.tsx` (route `/netwerk`, label *Netwerk*) +
+  a compact Home dashboard tile.
+- **Orchestrator:** `catosservice` registers `network` as an upstream, includes it
+  in `/api/system/health`, folds its summary into the house dashboard
+  (`dashboard.network`), and exposes `facts.network.*` to the rule engine
+  (internet status, router status, WiFi health, online/unknown counts, presence,
+  active alerts) so rules like *"if an unknown device joins, alert"* or *"if a
+  resident phone joins WiFi, mark probably home"* can be built.
+```

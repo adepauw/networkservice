@@ -1,0 +1,39 @@
+{
+  "_comment": "Copy to config.json and edit. config.json is gitignored. Secrets should be referenced by env-var name (password_env) and supplied via the environment, not inlined here.",
+
+  "poll_interval_seconds": 30,
+  "offline_grace_seconds": 300,
+  "presence_away_grace_seconds": 900,
+  "unknown_device_alert_cooldown_seconds": 3600,
+  "event_dedupe_cooldown_seconds": 600,
+
+  "sources": [
+    {
+      "id": "flint2",
+      "type": "glinet",
+      "display_name": "Flint 2",
+      "base_url": "http://192.168.8.1",
+      "enabled": true,
+      "capabilities": [
+        "dhcpLeases",
+        "wifiAssociations",
+        "interfaceCounters",
+        "routerHealth",
+        "firewallSummary"
+      ],
+      "options": {
+        "username": "root",
+        "password_env": "GLINET_PASSWORD"
+      }
+    }
+  ],
+
+  "persons": [
+    {
+      "person_id": "person_demo",
+      "display_name": "Demo Person",
+      "primary_device_ids": ["dev_phone_alex"],
+      "supporting_device_ids": ["dev_laptop_alex"]
+    }
+  ]
+}

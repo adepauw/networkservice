@@ -1,0 +1,7 @@
+# Local state + secrets — never commit.
+config/config.json
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
