@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from ..config import Settings
 from ..models import EventType, NetworkDevice, SourceSnapshot, now
+from .identity import is_randomized_mac
 
 
 class SecurityMonitor:
@@ -43,6 +44,7 @@ class SecurityMonitor:
         sustained attack doesn't spam the timeline).
         """
         by_mac = {d.mac_address: d for d in devices if d.mac_address}
+        online_macs = {d.mac_address for d in devices if d.is_online and d.mac_address}
 
         for snap in snapshots:
             sig = snap.security_signals or {}
@@ -72,7 +74,14 @@ class SecurityMonitor:
                 if not ip or not mac:
                     continue
                 prev_mac = self._known_ip_mac.get(ip)
-                if prev_mac and prev_mac != mac:
+                # Only a *genuine* conflict alerts: the IP now resolves to a new
+                # MAC while the previous MAC is still online (two live hosts on one
+                # IP — the MITM signature). Plain DHCP reassignment (old host gone)
+                # and privacy/randomized MACs are benign churn, not an attack.
+                if (prev_mac and prev_mac != mac
+                        and prev_mac in online_macs
+                        and not is_randomized_mac(mac)
+                        and not is_randomized_mac(prev_mac)):
                     dev = by_mac.get(mac)
                     emit(EventType.SECURITY_ARP_SPOOF_SUSPECTED.value, "warning",
                          "Verdachte ARP-wijziging",

@@ -39,6 +39,9 @@ def _snap(devices):
 
 def test_first_seen_and_unknown_joined():
     _, live, inv = _engine()
+    # cold-start baseline poll seeds existing devices silently (no alerts)
+    live.set_devices(inv.reconcile(inv.merge([_snap([])]), _collect([])))
+    # a device appearing *after* the baseline alerts
     events = []
     fresh = inv.merge([_snap([NetworkDevice(id="x", mac_address="3e:9a:71:00:00:01",
                                             is_online=True)])])
@@ -47,6 +50,18 @@ def test_first_seen_and_unknown_joined():
     types = {e[0] for e in events}
     assert EventType.DEVICE_FIRST_SEEN.value in types
     assert EventType.DEVICE_UNKNOWN_JOINED.value in types
+
+
+def test_baseline_poll_is_silent():
+    """Every already-connected device on cold start must NOT flood join alerts."""
+    _, live, inv = _engine()
+    events = []
+    fresh = inv.merge([_snap([
+        NetworkDevice(id="a", mac_address="aa:bb:cc:00:00:01", is_online=True),
+        NetworkDevice(id="b", mac_address="aa:bb:cc:00:00:02", is_online=True),
+    ])])
+    live.set_devices(inv.reconcile(fresh, _collect(events)))
+    assert events == []
 
 
 def test_offline_grace_suppresses_immediate_offline():

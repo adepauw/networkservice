@@ -28,6 +28,12 @@ class NetworkInventoryService:
         self._metadata_cache: dict[str, DeviceMetadata] = {}
         # mac -> first time we noticed it gone (for the offline grace window)
         self._gone_since: dict[str, float] = {}
+        # The first poll seeds the baseline silently: every already-connected
+        # device would otherwise look "new" and fire firstSeen/unknownJoined on
+        # cold start (40 alerts on boot). We only alert on devices that appear
+        # *after* the baseline is established. Mirrors ServiceEventMonitor's
+        # "first observation is the baseline" rule.
+        self._baseline_seeded = False
 
     def load_metadata(self) -> None:
         self._metadata_cache = self.metadata.all()
@@ -67,6 +73,7 @@ class NetworkInventoryService:
         """
         t = now()
         prev = self.live.devices
+        baseline = not self._baseline_seeded
         fresh_by_id = {d.id: d for d in fresh}
         result: list[NetworkDevice] = []
 
@@ -74,16 +81,18 @@ class NetworkInventoryService:
             old = prev.get(dev.id)
             self._gone_since.pop(dev.mac_address or dev.id, None)
             if old is None:
-                # brand-new device this poll
+                # brand-new device this poll. On the cold-start baseline poll we
+                # seed silently — only devices that appear *after* boot alert.
                 dev.first_seen_at = dev.first_seen_at or t
-                emit(EventType.DEVICE_FIRST_SEEN.value, "info",
-                     f"Nieuw apparaat: {dev.name}",
-                     dev.vendor or dev.host_name, dev, {"mac": dev.mac_address})
-                if not dev.is_known:
-                    emit(EventType.DEVICE_UNKNOWN_JOINED.value, "warning",
-                         f"Onbekend apparaat verbonden: {dev.name}",
-                         f"{dev.vendor or 'onbekende fabrikant'} · {', '.join(dev.ip_addresses) or '?'}",
-                         dev, {"mac": dev.mac_address, "randomized": identity.is_randomized_mac(dev.mac_address)})
+                if not baseline:
+                    emit(EventType.DEVICE_FIRST_SEEN.value, "info",
+                         f"Nieuw apparaat: {dev.name}",
+                         dev.vendor or dev.host_name, dev, {"mac": dev.mac_address})
+                    if not dev.is_known:
+                        emit(EventType.DEVICE_UNKNOWN_JOINED.value, "warning",
+                             f"Onbekend apparaat verbonden: {dev.name}",
+                             f"{dev.vendor or 'onbekende fabrikant'} · {', '.join(dev.ip_addresses) or '?'}",
+                             dev, {"mac": dev.mac_address, "randomized": identity.is_randomized_mac(dev.mac_address)})
             else:
                 dev.first_seen_at = old.first_seen_at
                 if old.is_known and not old.is_online and dev.is_online:
@@ -114,4 +123,5 @@ class NetworkInventoryService:
             else:
                 # still within grace: keep showing it online so we don't flap
                 result.append(stale)
+        self._baseline_seeded = True
         return result
