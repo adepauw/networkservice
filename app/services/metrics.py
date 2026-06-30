@@ -36,9 +36,13 @@ class MetricsService:
             if not dev.is_online or not dev.interfaces:
                 continue
             iface = dev.interfaces[0]
-            if iface.connection_type != "wifi" or iface.rssi is None:
+            if iface.connection_type != "wifi":
                 continue
             wifi_clients += 1
+            # Some sources (e.g. the GL.iNet API) don't report per-client RSSI;
+            # still count the client, just skip the signal-quality assessment.
+            if iface.rssi is None:
+                continue
             if worst_rssi is None or iface.rssi < worst_rssi:
                 worst_rssi, worst_device = iface.rssi, dev.name
 
