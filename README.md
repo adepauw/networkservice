@@ -160,19 +160,32 @@ only those.
 
 ## GL.iNet / OpenWrt integration status
 
-`sources/openwrt.py` and `sources/glinet.py` are **skeletons** with the
-normalization shape in place and the live device calls clearly marked `TODO`.
-Until they're wired, configuring them simply degrades the source (the engine keeps
-serving the last snapshot / mock data) — nothing breaks.
+`sources/glinet.py` is **live** (GL.iNet firmware 4.x, e.g. the Flint 2 /
+GL-MT6000). It logs in over the JSON-RPC API and reads the connected-client list:
 
-To finish the live Flint 2 integration we still need:
+- **Endpoint:** `https://192.168.8.1:4443/rpc` (this Flint 2 moved the admin/API
+  off port 80/443 to 4443; self-signed cert → `verify=False`, LAN-only).
+- **Auth:** challenge → `md5_crypt(password, "$1$<salt>")` →
+  `sha256("<user>:<cipher>:<nonce>")` → login → `sid`; re-login on session expiry.
+- **Data:** `clients.get_list` (mac, ip, ipv6, name, alias, iface
+  `2.4G`/`5G`/`cable`/`*_Guest`, online, blocked, traffic counters) +
+  `wifi.get_status` (per-band channel). Emits device rx/tx byte metrics and an ARP
+  view for the defensive detector.
+- **Known limitation:** this API does not expose **per-client RSSI**, so
+  `wifi.signalPoor` can't fire from this source (capability honestly omitted).
+  `crypt` (stdlib) is used for MD5-crypt — present on the pinned 3.11 container
+  image (removed in Python 3.13).
 
-- GL.iNet firmware version (the JSON-RPC `/rpc` API differs between 3.x and 4.x).
-- Confirmation the `/rpc` API is enabled, and the admin password (via
-  `GLINET_PASSWORD`, never committed).
-- The exact client-list payload shape (field names for signal/band/vendor).
-- Whether WireGuard/Tailscale peer status is exposed via the API (for VPN events).
-- Optionally, OpenWrt `ubus` credentials if we read DHCP/ARP/iwinfo directly.
+Configure it via `config.json` (`type: glinet`, `base_url`, `options.password_env`)
+and supply the password through the environment (`GLINET_PASSWORD`) — never
+committed. With a real source configured and `NETWORK_MOCK=0`, mock mode is off.
+
+`sources/openwrt.py` remains a **skeleton** (lower-level `ubus`/SSH path) for
+sources that don't speak the GL.iNet API. Still optional/future:
+
+- WireGuard/Tailscale peer status (for `vpn.peerConnected/Disconnected` events).
+- Router CPU/mem/uptime (the GL.iNet `system.info` method name differs; not yet
+  mapped — connectivity health is covered by the engine's own internet/DNS checks).
 
 ## How CatOS consumes it
 
