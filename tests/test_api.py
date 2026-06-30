@@ -128,3 +128,70 @@ def test_wake_requires_trust():
         if unknown:
             res = client.post(f"/devices/{unknown['id']}/wake")
             assert res.status_code == 403  # not trusted
+
+
+def test_wake_status_endpoint():
+    with TestClient(app) as client:
+        devices = client.get("/devices").json()["devices"]
+        nas = next((d for d in devices if d["device_type"] == "nas"), None)
+        assert nas is not None
+        # set up deterministic eligible state (other tests share the metadata db)
+        client.patch(f"/devices/{nas['id']}",
+                     json={"trust_level": "trusted", "role": "server",
+                           "device_type": "nas", "ignored": False, "is_known": True})
+        elig = client.get(f"/devices/{nas['id']}/wake/status").json()["eligibility"]
+        assert elig["can_wake"] is True
+        # a device classified as a phone/resident is not a wake target
+        client.patch(f"/devices/{nas['id']}",
+                     json={"role": "resident_device", "device_type": "phone"})
+        e2 = client.get(f"/devices/{nas['id']}/wake/status").json()["eligibility"]
+        assert e2["can_wake"] is False and e2["reason"]
+        # restore
+        client.patch(f"/devices/{nas['id']}",
+                     json={"role": "server", "device_type": "nas"})
+
+
+def test_sprint3_summary_blocks():
+    with TestClient(app) as client:
+        s = client.get("/summary").json()
+        assert "traffic" in s and "dns" in s and "vpn" in s and "topology" in s
+        # mock mode: traffic available, dns/vpn unconfigured, topology available
+        assert s["traffic"]["enabled"] is True
+        assert s["dns"]["configured"] is False
+        assert s["vpn"]["configured"] is False
+        assert s["topology"]["available"] is True
+
+
+def test_traffic_endpoints():
+    with TestClient(app) as client:
+        t = client.get("/traffic/summary").json()["traffic"]
+        assert "top_download_devices" in t
+        devices = client.get("/traffic/devices").json()["devices"]
+        assert isinstance(devices, list)
+        hist = client.get("/traffic/history").json()
+        assert "samples" in hist
+
+
+def test_dns_endpoints_unconfigured():
+    with TestClient(app) as client:
+        dns = client.get("/dns/summary").json()["dns"]
+        assert dns["configured"] is False
+        assert client.get("/dns/devices").json()["configured"] is False
+        assert client.get("/dns/blocked").json()["configured"] is False
+
+
+def test_vpn_endpoints_unconfigured():
+    with TestClient(app) as client:
+        vpn = client.get("/vpn/summary").json()["vpn"]
+        assert vpn["configured"] is False
+        assert client.get("/vpn/peers").json()["configured"] is False
+
+
+def test_topology_endpoint_groups_devices():
+    with TestClient(app) as client:
+        t = client.get("/topology").json()
+        assert t["available"] is True
+        assert isinstance(t["groups"], list) and t["groups"]
+        assert isinstance(t["counts"], dict)
+        # the mock router should be present in a 'router' group
+        assert any(g["id"] == "router" for g in t["groups"])

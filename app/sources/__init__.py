@@ -11,9 +11,16 @@ import logging
 
 from ..config import Settings, SourceConfig
 from .base import NetworkSourceAdapter
+from .dns import AdGuardSourceAdapter, DnsSourceAdapter, PiHoleSourceAdapter
 from .glinet import GlinetAdapter
 from .mock import MockNetworkSourceAdapter
 from .openwrt import OpenWrtAdapter
+from .vpn import (
+    GlinetVpnSourceAdapter,
+    OpenWrtVpnSourceAdapter,
+    TailscaleSourceAdapter,
+    WireGuardSourceAdapter,
+)
 
 log = logging.getLogger("networkservice.sources")
 
@@ -21,6 +28,15 @@ _REGISTRY: dict[str, type[NetworkSourceAdapter]] = {
     "mock": MockNetworkSourceAdapter,
     "openwrt": OpenWrtAdapter,
     "glinet": GlinetAdapter,
+    # Sprint 3: DNS analytics sources
+    "adguard": AdGuardSourceAdapter,
+    "pihole": PiHoleSourceAdapter,
+    "dns": DnsSourceAdapter,
+    # Sprint 3: VPN sources
+    "tailscale": TailscaleSourceAdapter,
+    "wireguard": WireGuardSourceAdapter,
+    "glinet_vpn": GlinetVpnSourceAdapter,
+    "openwrt_vpn": OpenWrtVpnSourceAdapter,
 }
 
 
@@ -60,5 +76,12 @@ __all__ = [
     "MockNetworkSourceAdapter",
     "OpenWrtAdapter",
     "GlinetAdapter",
+    "AdGuardSourceAdapter",
+    "PiHoleSourceAdapter",
+    "DnsSourceAdapter",
+    "TailscaleSourceAdapter",
+    "WireGuardSourceAdapter",
+    "GlinetVpnSourceAdapter",
+    "OpenWrtVpnSourceAdapter",
     "build_adapters",
 ]

@@ -139,6 +139,36 @@ class Settings:
     # Wake-on-LAN broadcast address (LAN broadcast). Empty disables WoL.
     wol_broadcast: str = os.environ.get("WOL_BROADCAST", "255.255.255.255")
     wol_enabled: bool = _bool("WOL_ENABLED", True)
+    # Roles/types a device must carry to be eligible for Wake-on-LAN. A device is
+    # wakeable if its role is in allowed_roles OR its device_type is in
+    # allowed_device_types (plus the trust/known/MAC gates). Overridable via the
+    # config file's "wake_on_lan" block.
+    wol_allowed_roles: tuple[str, ...] = ("workstation", "server", "media", "infrastructure")
+    wol_allowed_device_types: tuple[str, ...] = ("desktop", "server", "nas", "laptop", "tv")
+
+    # --- Sprint 3: traffic insights ------------------------------------------
+    traffic_enabled: bool = _bool("TRAFFIC_ENABLED", True)
+    traffic_history_limit: int = _int("TRAFFIC_HISTORY_LIMIT", 1000)
+    # conservative defaults: ~50 Mbps sustained download = "high usage";
+    # ~10 Mbps sustained upload from one device = "unusual upload".
+    traffic_high_usage_threshold_bps: float = _float("TRAFFIC_HIGH_USAGE_BPS", 50_000_000)
+    traffic_unusual_upload_threshold_bps: float = _float("TRAFFIC_UNUSUAL_UPLOAD_BPS", 10_000_000)
+
+    # --- Sprint 3: DNS protection --------------------------------------------
+    dns_enabled: bool = _bool("DNS_ENABLED", False)
+    # "summary" keeps per-device DNS data aggregate-only (no full query logs).
+    dns_privacy_mode: str = os.environ.get("DNS_PRIVACY_MODE", "summary")
+    # raise dns.blockedSpike once blocked-% jumps this many points above baseline.
+    dns_blocked_spike_percent: float = _float("DNS_BLOCKED_SPIKE_PERCENT", 25.0)
+    dns_noisy_device_queries: int = _int("DNS_NOISY_DEVICE_QUERIES", 5000)
+
+    # --- Sprint 3: VPN --------------------------------------------------------
+    vpn_enabled: bool = _bool("VPN_ENABLED", False)
+    # peers unseen this long are reported "stale" (vpn.peerStale).
+    vpn_peer_stale_seconds: int = _int("VPN_PEER_STALE_SECONDS", 600)
+
+    # --- Sprint 3: topology ---------------------------------------------------
+    topology_enabled: bool = _bool("TOPOLOGY_ENABLED", True)
 
 
 def _load_file(path: str) -> dict[str, Any]:
@@ -182,7 +212,13 @@ def load_settings() -> Settings:
     base = Settings()
     file_cfg = _load_file(base.config_path)
 
-    sources = _parse_sources(file_cfg.get("sources", []))
+    # Sources live in the top-level "sources" array; DNS/VPN sources may also be
+    # declared in their own blocks (dns.sources / vpn.sources) for readability.
+    # We fold them all into one adapter pipeline.
+    raw_sources = list(file_cfg.get("sources", []))
+    raw_sources += list(file_cfg.get("dns", {}).get("sources", []))
+    raw_sources += list(file_cfg.get("vpn", {}).get("sources", []))
+    sources = _parse_sources(raw_sources)
     persons = list(file_cfg.get("persons", []))
 
     # Mock mode with no configured persons → inject a demo person so the presence
@@ -235,6 +271,42 @@ def load_settings() -> Settings:
     for file_key, (field_name, caster) in _diag_map.items():
         if file_key in diag:
             overrides[field_name] = caster(diag[file_key])
+
+    # Sprint 3 config blocks (wake_on_lan / traffic / dns / vpn / topology).
+    wol = file_cfg.get("wake_on_lan", {})
+    if "enabled" in wol:
+        overrides["wol_enabled"] = bool(wol["enabled"])
+    if "broadcast_address" in wol:
+        overrides["wol_broadcast"] = str(wol["broadcast_address"])
+    if "allowed_roles" in wol:
+        overrides["wol_allowed_roles"] = tuple(wol["allowed_roles"])
+    if "allowed_device_types" in wol:
+        overrides["wol_allowed_device_types"] = tuple(wol["allowed_device_types"])
+
+    traffic = file_cfg.get("traffic", {})
+    _traffic_map = {
+        "enabled": ("traffic_enabled", bool),
+        "history_limit": ("traffic_history_limit", int),
+        "high_usage_threshold_bps": ("traffic_high_usage_threshold_bps", float),
+        "unusual_upload_threshold_bps": ("traffic_unusual_upload_threshold_bps", float),
+    }
+    for file_key, (field_name, caster) in _traffic_map.items():
+        if file_key in traffic:
+            overrides[field_name] = caster(traffic[file_key])
+
+    dns = file_cfg.get("dns", {})
+    if "enabled" in dns:
+        overrides["dns_enabled"] = bool(dns["enabled"])
+    if "privacy_mode" in dns:
+        overrides["dns_privacy_mode"] = str(dns["privacy_mode"])
+
+    vpn = file_cfg.get("vpn", {})
+    if "enabled" in vpn:
+        overrides["vpn_enabled"] = bool(vpn["enabled"])
+
+    topo = file_cfg.get("topology", {})
+    if "enabled" in topo:
+        overrides["topology_enabled"] = bool(topo["enabled"])
 
     return Settings(
         **overrides,

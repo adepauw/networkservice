@@ -183,13 +183,25 @@ class MockNetworkSourceAdapter(NetworkSourceAdapter):
                       and d.interfaces[0].connection_type == "wifi")
         metrics.append(NetworkMetric(id=f"m_wc_{self._tick}", type="wifi.clientCount",
                                      scope="wifi", value=clients, unit="clients", source=self.id))
-        # per-device throughput so the "top traffic" card has data
+        # per-device throughput so the traffic insights cards have data. rx is the
+        # heavier direction; a couple of devices (NAS backup, a phone upload) push
+        # enough up to occasionally trip the unusual-upload threshold.
         for d in devices:
-            if d.is_online:
-                metrics.append(NetworkMetric(
-                    id=f"m_rx_{d.id}_{self._tick}", type="device.rxBytes", scope="device",
-                    device_id=d.id, value=round(self._rng.random() * 5_000_000),
-                    unit="bytes", source=self.id))
+            if not d.is_online:
+                continue
+            # key metrics by the canonical mac-based id the inventory will assign
+            # (dev_<machex>), matching the live adapters — otherwise per-device
+            # traffic can't be tied back to the merged device.
+            canonical = f"dev_{d.mac_address.replace(':', '')}" if d.mac_address else d.id
+            rx = round(self._rng.random() * 5_000_000)
+            up_heavy = d.device_type in ("nas", "server")
+            tx = round(self._rng.random() * (2_500_000 if up_heavy else 400_000))
+            metrics.append(NetworkMetric(
+                id=f"m_rx_{canonical}_{self._tick}", type="device.rxBytes", scope="device",
+                device_id=canonical, value=rx, unit="bytes", source=self.id))
+            metrics.append(NetworkMetric(
+                id=f"m_tx_{canonical}_{self._tick}", type="device.txBytes", scope="device",
+                device_id=canonical, value=tx, unit="bytes", source=self.id))
 
         # --- defensive security signals (detection inputs only) ---------------
         signals: dict = {}

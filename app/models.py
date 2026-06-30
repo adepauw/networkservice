@@ -55,11 +55,22 @@ WifiStatus = Literal["good", "fair", "poor", "critical", "unknown"]
 ClientQuality = Literal["excellent", "good", "fair", "poor", "critical", "unknown"]
 
 SourceType = Literal[
-    "glinet", "openwrt", "adguard", "pihole", "tailscale", "phobos", "mdns",
-    "ssdp", "manual", "mock", "unknown",
+    "glinet", "openwrt", "adguard", "pihole", "dns", "tailscale", "wireguard",
+    "glinet_vpn", "openwrt_vpn", "phobos", "mdns", "ssdp", "manual", "mock",
+    "unknown",
 ]
 
 SourceStatus = Literal["ok", "degraded", "error", "disabled", "unknown"]
+
+# Sprint 3 enumerations
+WakeStatus = Literal["sent", "unsupported", "forbidden", "failed", "unknown"]
+DnsProtectionStatus = Literal["active", "degraded", "unconfigured", "unknown"]
+VpnStatus = Literal["online", "degraded", "offline", "unknown"]
+VpnPeerStatus = Literal["connected", "disconnected", "stale", "online", "offline", "unknown"]
+TopologyGroupId = Literal[
+    "router", "wired", "wifi_2_4", "wifi_5", "wifi_6", "guest", "vpn",
+    "infrastructure", "smart_home", "unknown", "offline",
+]
 
 
 class EventType(str, Enum):
@@ -94,6 +105,24 @@ class EventType(str, Enum):
     ROUTER_CONFIG_CHANGED = "router.configChanged"
     VPN_PEER_CONNECTED = "vpn.peerConnected"
     VPN_PEER_DISCONNECTED = "vpn.peerDisconnected"
+    VPN_PEER_STALE = "vpn.peerStale"
+    VPN_SOURCE_DEGRADED = "vpn.sourceDegraded"
+    VPN_SOURCE_RECOVERED = "vpn.sourceRecovered"
+    # --- Sprint 3: Wake-on-LAN ----------------------------------------------
+    DEVICE_WAKE_REQUESTED = "device.wakeRequested"
+    DEVICE_WAKE_SENT = "device.wakeSent"
+    DEVICE_WAKE_FAILED = "device.wakeFailed"
+    # --- Sprint 3: traffic insights -----------------------------------------
+    TRAFFIC_HIGH_USAGE = "traffic.highUsage"
+    TRAFFIC_UNUSUAL_UPLOAD = "traffic.unusualUpload"
+    TRAFFIC_SPIKE = "traffic.spike"
+    # --- Sprint 3: DNS protection -------------------------------------------
+    DNS_PROTECTION_ACTIVE = "dns.protectionActive"
+    DNS_PROTECTION_DEGRADED = "dns.protectionDegraded"
+    DNS_PROTECTION_RECOVERED = "dns.protectionRecovered"
+    DNS_BLOCKED_SPIKE = "dns.blockedSpike"
+    DNS_DEVICE_NOISY = "dns.deviceNoisy"
+    DNS_SUSPICIOUS_DOMAIN = "dns.suspiciousDomain"
     PRESENCE_PERSON_ARRIVED = "presence.personArrived"
     PRESENCE_PERSON_LEFT = "presence.personLeft"
     PRESENCE_PERSON_PROBABLY_HOME = "presence.personProbablyHome"
@@ -340,7 +369,237 @@ class NetworkSource(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+# --- Sprint 3: Wake-on-LAN ---------------------------------------------------
+
+class WakeResult(BaseModel):
+    """Structured outcome of a Wake-on-LAN attempt. ``status`` is the contract the
+    UI keys off; ``message`` is a human, Dutch-friendly explanation."""
+
+    device_id: str
+    attempted_at: float = Field(default_factory=now)
+    target_mac: Optional[str] = None
+    broadcast_address: Optional[str] = None
+    status: WakeStatus = "unknown"
+    message: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WakeEligibility(BaseModel):
+    """Whether a device may be woken, and why not when it can't — drives the UI's
+    conditional Wake action and the GET /devices/{id}/wake/status endpoint."""
+
+    device_id: str
+    can_wake: bool = False
+    reason: Optional[str] = None
+    target_mac: Optional[str] = None
+    broadcast_address: Optional[str] = None
+    wol_enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# --- Sprint 3: traffic insights ----------------------------------------------
+
+class TrafficDeviceStats(BaseModel):
+    device_id: str
+    display_name: str
+    rx_bytes: float = 0.0
+    tx_bytes: float = 0.0
+    download_bps: Optional[float] = None
+    upload_bps: Optional[float] = None
+    total_bytes: float = 0.0
+    period: str = "current"
+    rank: int = 0
+    is_unusual: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TrafficSummary(BaseModel):
+    sampled_at: float = Field(default_factory=now)
+    total_rx_bytes: float = 0.0
+    total_tx_bytes: float = 0.0
+    current_download_bps: Optional[float] = None
+    current_upload_bps: Optional[float] = None
+    top_download_devices: list[TrafficDeviceStats] = Field(default_factory=list)
+    top_upload_devices: list[TrafficDeviceStats] = Field(default_factory=list)
+    unusual_devices: list[TrafficDeviceStats] = Field(default_factory=list)
+    period: str = "current"
+    history_available: bool = False
+    source: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TrafficSample(BaseModel):
+    id: str
+    sampled_at: float = Field(default_factory=now)
+    total_rx_bytes: float = 0.0
+    total_tx_bytes: float = 0.0
+    current_download_bps: Optional[float] = None
+    current_upload_bps: Optional[float] = None
+    top_device_id: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TrafficTrend(BaseModel):
+    direction: Literal["rising", "falling", "stable", "unknown"] = "unknown"
+    window_seconds: int = 0
+    average_download_bps: Optional[float] = None
+    average_upload_bps: Optional[float] = None
+
+
+# --- Sprint 3: DNS protection ------------------------------------------------
+
+class DnsDeviceStats(BaseModel):
+    device_id: Optional[str] = None
+    display_name: str
+    query_count: int = 0
+    blocked_count: int = 0
+    blocked_percent: float = 0.0
+    top_domains: list[str] = Field(default_factory=list)
+    top_blocked_domains: list[str] = Field(default_factory=list)
+    last_query_at: Optional[float] = None
+    is_noisy: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DnsBlockedEvent(BaseModel):
+    sampled_at: float = Field(default_factory=now)
+    domain: str
+    device_id: Optional[str] = None
+    device_name: Optional[str] = None
+    reason: Optional[str] = None
+    source: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DnsSourceStatus(BaseModel):
+    id: str
+    type: SourceType = "unknown"
+    display_name: str
+    status: SourceStatus = "unknown"
+    protection_enabled: bool = False
+    last_success_at: Optional[float] = None
+    error_message: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DnsSummary(BaseModel):
+    sampled_at: float = Field(default_factory=now)
+    configured: bool = False
+    query_count: int = 0
+    blocked_count: int = 0
+    blocked_percent: float = 0.0
+    top_devices: list[DnsDeviceStats] = Field(default_factory=list)
+    top_domains: list[str] = Field(default_factory=list)
+    top_blocked_domains: list[str] = Field(default_factory=list)
+    protection_status: DnsProtectionStatus = "unconfigured"
+    sources: list[DnsSourceStatus] = Field(default_factory=list)
+    source: Optional[str] = None
+    history_available: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# --- Sprint 3: VPN -----------------------------------------------------------
+
+class VpnPeer(BaseModel):
+    id: str
+    display_name: str
+    source: Optional[str] = None
+    type: SourceType = "unknown"
+    status: VpnPeerStatus = "unknown"
+    ip_addresses: list[str] = Field(default_factory=list)
+    last_seen_at: Optional[float] = None
+    last_handshake_at: Optional[float] = None
+    rx_bytes: Optional[float] = None
+    tx_bytes: Optional[float] = None
+    device_id: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VpnSourceStatus(BaseModel):
+    id: str
+    type: SourceType = "unknown"
+    display_name: str
+    status: VpnStatus = "unknown"
+    peer_count: int = 0
+    connected_peer_count: int = 0
+    last_success_at: Optional[float] = None
+    error_message: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VpnSummary(BaseModel):
+    sampled_at: float = Field(default_factory=now)
+    configured: bool = False
+    status: VpnStatus = "unknown"
+    peer_count: int = 0
+    connected_peer_count: int = 0
+    sources: list[VpnSourceStatus] = Field(default_factory=list)
+    last_change_at: Optional[float] = None
+    history_available: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# --- Sprint 3: topology ------------------------------------------------------
+
+class TopologyNode(BaseModel):
+    id: str
+    device_id: Optional[str] = None
+    display_name: str
+    device_type: DeviceType = "unknown"
+    role: DeviceRole = "unknown"
+    trust_level: TrustLevel = "unknown"
+    status: Literal["online", "offline", "unknown"] = "unknown"
+    group: TopologyGroupId = "unknown"
+    connection_type: ConnectionType = "unknown"
+    parent_id: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TopologyLink(BaseModel):
+    source_id: str
+    target_id: str
+    type: Literal["wired", "wifi", "vpn", "uplink", "unknown"] = "unknown"
+    quality: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TopologyGroup(BaseModel):
+    id: TopologyGroupId
+    label: str
+    device_count: int = 0
+    nodes: list[TopologyNode] = Field(default_factory=list)
+
+
+class NetworkTopology(BaseModel):
+    generated_at: float = Field(default_factory=now)
+    groups: list[TopologyGroup] = Field(default_factory=list)
+    links: list[TopologyLink] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 # --- adapter output ----------------------------------------------------------
+
+class SourceDnsData(BaseModel):
+    """Normalized DNS analytics one source observed this poll."""
+
+    protection_enabled: bool = True
+    query_count: int = 0
+    blocked_count: int = 0
+    devices: list[DnsDeviceStats] = Field(default_factory=list)
+    top_domains: list[str] = Field(default_factory=list)
+    top_blocked_domains: list[str] = Field(default_factory=list)
+    blocked_events: list[DnsBlockedEvent] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourceVpnData(BaseModel):
+    """Normalized VPN state one source observed this poll."""
+
+    status: VpnStatus = "unknown"
+    peers: list[VpnPeer] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
 
 class SourceSnapshot(BaseModel):
     """One poll's worth of normalized data from a single source adapter.
@@ -362,6 +621,9 @@ class SourceSnapshot(BaseModel):
     # Security signals the source observed this tick (deauth counters, rogue
     # SSIDs, open-port sets). The security service interprets these into events.
     security_signals: dict[str, Any] = Field(default_factory=dict)
+    # Sprint 3: DNS analytics + VPN peers this source observed (best-effort).
+    dns: Optional[SourceDnsData] = None
+    vpn: Optional[SourceVpnData] = None
     # Capabilities actually fulfilled this poll (subset of configured).
     capabilities: list[str] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)

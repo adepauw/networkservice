@@ -8,12 +8,16 @@ from fastapi import APIRouter
 from . import (
     routes_alerts,
     routes_devices,
+    routes_dns,
     routes_events,
     routes_health,
     routes_internet,
     routes_metrics,
     routes_presence,
     routes_summary,
+    routes_topology,
+    routes_traffic,
+    routes_vpn,
     routes_wifi,
 )
 
@@ -24,6 +28,8 @@ def build_api(engine) -> APIRouter:
         routes_summary, routes_devices, routes_events, routes_alerts,
         routes_presence, routes_health, routes_metrics,
         routes_internet, routes_wifi,
+        # Sprint 3
+        routes_traffic, routes_dns, routes_vpn, routes_topology,
     ):
         router.include_router(mod.build_router(engine))
     return router

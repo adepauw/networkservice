@@ -27,13 +27,19 @@ from typing import Optional
 
 from .models import (
     DeviceMetadata,
+    DnsSummary,
     InternetHealthStatus,
     NetworkDevice,
     NetworkEvent,
     NetworkHealthSample,
     NetworkMetric,
     NetworkSource,
+    NetworkTopology,
     PresenceState,
+    TrafficSample,
+    TrafficSummary,
+    VpnPeer,
+    VpnSummary,
     WifiQualitySummary,
 )
 
@@ -162,6 +168,13 @@ class LiveStore:
         self.internet_health: Optional[InternetHealthStatus] = None
         self.wifi_quality: Optional[WifiQualitySummary] = None
         self.health_history: deque[NetworkHealthSample] = deque(maxlen=history_limit)
+        # Sprint 3: traffic / DNS / VPN / topology latest snapshots + traffic ring.
+        self.traffic_summary: Optional[TrafficSummary] = None
+        self.dns_summary: Optional[DnsSummary] = None
+        self.vpn_summary: Optional[VpnSummary] = None
+        self.vpn_peers: list[VpnPeer] = []
+        self.topology: Optional[NetworkTopology] = None
+        self.traffic_history: deque[TrafficSample] = deque(maxlen=history_limit)
 
     # --- devices --------------------------------------------------------------
     def set_devices(self, devices: list[NetworkDevice]) -> None:
@@ -208,6 +221,20 @@ class LiveStore:
     def health_samples(self, limit: int = 200, since: float | None = None) -> list[NetworkHealthSample]:
         out: list[NetworkHealthSample] = []
         for s in self.health_history:
+            if since is not None and s.sampled_at < since:
+                break
+            out.append(s)
+            if len(out) >= limit:
+                break
+        return out
+
+    # --- traffic history ------------------------------------------------------
+    def append_traffic_sample(self, sample: TrafficSample) -> None:
+        self.traffic_history.appendleft(sample)
+
+    def traffic_samples(self, limit: int = 200, since: float | None = None) -> list[TrafficSample]:
+        out: list[TrafficSample] = []
+        for s in self.traffic_history:
             if since is not None and s.sampled_at < since:
                 break
             out.append(s)

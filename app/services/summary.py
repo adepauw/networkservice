@@ -13,7 +13,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ..models import InternetHealthStatus, WifiQualitySummary, now
+from ..models import (
+    DnsSummary,
+    InternetHealthStatus,
+    NetworkTopology,
+    TrafficSummary,
+    VpnSummary,
+    WifiQualitySummary,
+    now,
+)
 from ..store import LiveStore
 from .metrics import MetricsService
 from .presence import PresenceResolver
@@ -26,6 +34,10 @@ def build_summary(
     internet: Optional[InternetHealthStatus],
     wifi: Optional[WifiQualitySummary],
     last_outage_at: Optional[float] = None,
+    traffic: Optional[TrafficSummary] = None,
+    dns: Optional[DnsSummary] = None,
+    vpn: Optional[VpnSummary] = None,
+    topology: Optional[NetworkTopology] = None,
 ) -> dict:
     devices = live.device_list()
     online = [d for d in devices if d.is_online]
@@ -91,8 +103,70 @@ def build_summary(
             "network_health_score": score,
         },
         "network_health_score": score,
+        # Sprint 3 compact blocks — folded into the single /summary call so
+        # catosservice's dashboard/facts need no extra round-trips.
+        "traffic": _traffic_block(traffic),
+        "dns": _dns_block(dns),
+        "vpn": _vpn_block(vpn),
+        "topology": _topology_block(topology),
         "last_event": last_event.model_dump() if last_event else None,
         "top_bandwidth": metrics.top_bandwidth(),
+    }
+
+
+def _traffic_block(traffic: Optional[TrafficSummary]) -> dict:
+    if traffic is None:
+        return {"enabled": False, "available": False}
+    top = traffic.top_download_devices[0] if traffic.top_download_devices else None
+    return {
+        "enabled": True,
+        "available": bool(traffic.top_download_devices),
+        "current_download_bps": traffic.current_download_bps,
+        "current_upload_bps": traffic.current_upload_bps,
+        "total_rx_bytes": traffic.total_rx_bytes,
+        "total_tx_bytes": traffic.total_tx_bytes,
+        "top_device": {"device_id": top.device_id, "name": top.display_name,
+                       "rx_bytes": top.rx_bytes} if top else None,
+        "unusual_count": len(traffic.unusual_devices),
+        "period": traffic.period,
+    }
+
+
+def _dns_block(dns: Optional[DnsSummary]) -> dict:
+    if dns is None or not dns.configured:
+        return {"configured": False, "protection_status": "unconfigured"}
+    return {
+        "configured": True,
+        "protection_status": dns.protection_status,
+        "query_count": dns.query_count,
+        "blocked_count": dns.blocked_count,
+        "blocked_percent": dns.blocked_percent,
+        "noisy_device": next((d.display_name for d in dns.top_devices if d.is_noisy), None),
+    }
+
+
+def _vpn_block(vpn: Optional[VpnSummary]) -> dict:
+    if vpn is None or not vpn.configured:
+        return {"configured": False, "status": "unknown"}
+    return {
+        "configured": True,
+        "status": vpn.status,
+        "peer_count": vpn.peer_count,
+        "connected_peer_count": vpn.connected_peer_count,
+        "source_count": len(vpn.sources),
+    }
+
+
+def _topology_block(topology: Optional[NetworkTopology]) -> dict:
+    if topology is None:
+        return {"available": False, "counts": {}}
+    return {
+        "available": True,
+        "counts": topology.counts,
+        "group_count": len(topology.groups),
+        "unknown_count": topology.counts.get("unknown", 0),
+        "guest_count": topology.counts.get("guest", 0),
+        "vpn_count": topology.counts.get("vpn", 0),
     }
 
 

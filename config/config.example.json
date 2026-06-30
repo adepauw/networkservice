@@ -24,6 +24,52 @@
     "health_history_limit": 1000
   },
 
+  "wake_on_lan": {
+    "enabled": true,
+    "broadcast_address": "255.255.255.255",
+    "allowed_roles": ["workstation", "server", "media", "infrastructure"],
+    "allowed_device_types": ["desktop", "server", "nas", "laptop", "tv"]
+  },
+
+  "traffic": {
+    "enabled": true,
+    "history_limit": 1000,
+    "high_usage_threshold_bps": 50000000,
+    "unusual_upload_threshold_bps": 10000000
+  },
+
+  "dns": {
+    "enabled": false,
+    "privacy_mode": "summary",
+    "_comment": "set enabled:true and a source below (mock works without creds)",
+    "sources": [
+      {
+        "id": "adguard",
+        "type": "adguard",
+        "display_name": "AdGuard Home",
+        "base_url": "",
+        "enabled": false,
+        "options": { "mock": true, "username": "admin", "password_env": "ADGUARD_PASSWORD" }
+      }
+    ]
+  },
+
+  "vpn": {
+    "enabled": false,
+    "sources": [
+      {
+        "id": "tailscale",
+        "type": "tailscale",
+        "display_name": "Tailscale",
+        "base_url": "",
+        "enabled": false,
+        "options": { "mock": true, "binary": "tailscale" }
+      }
+    ]
+  },
+
+  "topology": { "enabled": true },
+
   "sources": [
     {
       "id": "flint2",
