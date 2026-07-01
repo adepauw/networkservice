@@ -14,11 +14,21 @@ Data used:
     clients.get_list  -> connected/known clients (mac, ip, ipv6, name, alias,
                          iface 2.4G/5G/cable/*_Guest, online, blocked, traffic)
     wifi.get_status   -> per-band channel (RSSI is not exposed per client here)
+    system.get_status -> router health: CPU temperature, load average, memory,
+                         uptime (probed live against a Flint 2; confirmed shape
+                         below). We deliberately only read the ``system`` key —
+                         the same call's ``wifi`` key echoes plaintext WiFi
+                         passwords and ``service`` lists enabled addons, neither
+                         of which this adapter stores or forwards.
 
 RSSI/signal is not available from this API, so wifi.signalPoor can't fire from
 this source — reported honestly via capabilities (no `wifiSignal`). The engine's
 own internet/DNS checks cover connectivity; a successful login implies the router
 is reachable (router_online=True).
+
+``system.get_status.system`` has no true CPU-utilization percentage (only a
+temperature reading and a 1/5/15-min load average) — ``router.cpuPercent`` is
+left unset rather than faked from load average against an unknown core count.
 
 Read-only. The only outbound action anywhere in the service is Wake-on-LAN to a
 known/trusted device, which lives in the service layer — not here.
@@ -172,6 +182,40 @@ class GlinetAdapter(NetworkSourceAdapter):
                 device_id=dev.id, value=val, unit="bytes", source=self.id, sampled_at=t))
         return dev, metrics
 
+    def _router_metrics(self, sys_status: dict, out: list[NetworkMetric]) -> float | None:
+        """Extract router health metrics from ``system.get_status.system``.
+
+        Best-effort/honest: only emits a metric for a field that's actually
+        present. ``memory_total``/``memory_free`` give a real memory percent;
+        there's no true CPU-utilization figure on this API, only temperature
+        and load average, so ``router.cpuPercent`` stays unset.
+        """
+        t = now()
+
+        def emit(mtype: str, value: Any, unit: str | None) -> None:
+            if value is None:
+                return
+            out.append(NetworkMetric(
+                id=f"m_{mtype}_{self.id}_{int(t)}", type=mtype, scope="router",
+                value=float(value), unit=unit, source=self.id, sampled_at=t))
+
+        mem_total = sys_status.get("memory_total")
+        mem_free = sys_status.get("memory_free")
+        if isinstance(mem_total, (int, float)) and mem_total and isinstance(mem_free, (int, float)):
+            emit("router.memoryPercent", (1 - mem_free / mem_total) * 100, "percent")
+
+        uptime = sys_status.get("uptime")
+        emit("router.uptimeSeconds", uptime, "seconds")
+
+        temp = (sys_status.get("cpu") or {}).get("temperature")
+        emit("router.cpuTemperatureC", temp, "celsius")
+
+        load = sys_status.get("load_average")
+        if isinstance(load, list) and load:
+            emit("router.loadAverage1m", load[0], None)
+
+        return float(uptime) if isinstance(uptime, (int, float)) else None
+
     async def _poll(self) -> SourceSnapshot:
         if not self.config.base_url and not self._password:
             return SourceSnapshot(source_id=self.id, capabilities=[])
@@ -193,6 +237,14 @@ class GlinetAdapter(NetworkSourceAdapter):
         except Exception as exc:  # noqa: BLE001
             log.debug("wifi.get_status failed: %s", exc)
 
+        router_uptime_seconds: float | None = None
+        router_metrics: list[NetworkMetric] = []
+        try:
+            sys_status = (await self._call("system", "get_status")).get("system", {})
+            router_uptime_seconds = self._router_metrics(sys_status, router_metrics)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("system.get_status failed: %s", exc)
+
         devices: list[NetworkDevice] = []
         metrics: list[NetworkMetric] = []
         for c in clients:
@@ -205,6 +257,7 @@ class GlinetAdapter(NetworkSourceAdapter):
         metrics.append(NetworkMetric(
             id=f"m_wc_{int(now())}", type="wifi.clientCount", scope="wifi",
             value=online_wifi, unit="clients", source=self.id))
+        metrics.extend(router_metrics)
 
         # ARP view (ip->mac) for the defensive ARP-spoof / MAC-conflict detector.
         arp = [{"ip": d.ip_addresses[0], "mac": d.mac_address}
@@ -215,6 +268,7 @@ class GlinetAdapter(NetworkSourceAdapter):
             devices=devices,
             metrics=metrics,
             router_online=True,  # a successful authenticated poll implies reachability
+            router_uptime_seconds=router_uptime_seconds,
             security_signals={"arp": arp},
             capabilities=["dhcpLeases", "wifiAssociations", "interfaceCounters", "routerHealth"],
         )

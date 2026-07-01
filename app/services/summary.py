@@ -88,6 +88,8 @@ def build_summary(
             "status": "healthy" if live.router_online else (
                 "unknown" if live.router_online is None else "error"),
             "cpu_percent": metrics.latest("router.cpuPercent"),
+            "cpu_temperature_c": metrics.latest("router.cpuTemperatureC"),
+            "load_average_1m": metrics.latest("router.loadAverage1m"),
             "memory_percent": metrics.latest("router.memoryPercent"),
             "uptime_seconds": metrics.latest("router.uptimeSeconds"),
         },
