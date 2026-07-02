@@ -149,5 +149,9 @@ class PresenceResolver:
             out.append(state)
         return out
 
+    def states(self) -> list[PresenceState]:
+        """Current person states (public accessor for the API routes)."""
+        return list(self._states.values())
+
     def home_count(self) -> int:
         return sum(1 for s in self._states.values() if s.status in ("home", "probably_home"))

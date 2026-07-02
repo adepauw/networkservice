@@ -73,32 +73,32 @@ def _md5_crypt(password: str, salt: str, alg: int) -> str:
     return crypt.crypt(password, f"${alg}${salt}")
 
 
-class GlinetAdapter(NetworkSourceAdapter):
-    source_type = "glinet"
+class GlinetRpcClient:
+    """Authenticated JSON-RPC client for the GL.iNet 4.x API (challenge → login →
+    call). Shared by the router adapter and the VPN adapter; each instance holds
+    its own session (sid) so one expiring never wedges the other."""
 
-    def __init__(self, config, settings) -> None:
-        super().__init__(config, settings)
-        opts = config.options or {}
-        self._username = opts.get("username", "root")
-        self._password = os.environ.get(
-            opts.get("password_env", "GLINET_PASSWORD"), opts.get("password", "")
-        )
+    def __init__(self, base_url: str, username: str, password: str,
+                 timeout: float, label: str = "glinet") -> None:
+        self.base_url = base_url or "https://192.168.8.1:4443"
+        self._username = username
+        self._password = password
+        self._timeout = timeout
+        self._label = label
         self._sid: str | None = None
         self._client: httpx.AsyncClient | None = None
         self._rpc_id = 0
 
-    async def start(self) -> None:
-        base = self.config.base_url or "https://192.168.8.1:4443"
+    async def open(self) -> None:
         # Self-signed cert on the router LAN UI → verify=False (LAN-only, trusted host).
         self._client = httpx.AsyncClient(
-            base_url=base, timeout=self.settings.request_timeout, verify=False
+            base_url=self.base_url, timeout=self._timeout, verify=False
         )
 
-    async def stop(self) -> None:
+    async def close(self) -> None:
         if self._client is not None:
             await self._client.aclose()
 
-    # --- JSON-RPC plumbing ----------------------------------------------------
     async def _rpc(self, method: str, params: Any) -> dict:
         assert self._client is not None
         self._rpc_id += 1
@@ -110,7 +110,7 @@ class GlinetAdapter(NetworkSourceAdapter):
 
     async def _login(self) -> str:
         if not self._password:
-            raise RuntimeError("GLINET_PASSWORD not set for source %s" % self.id)
+            raise RuntimeError("GLINET_PASSWORD not set for source %s" % self._label)
         ch = (await self._rpc("challenge", {"username": self._username}))["result"]
         cipher = _md5_crypt(self._password, ch["salt"], ch["alg"])
         digest = hashlib.sha256(f"{self._username}:{cipher}:{ch['nonce']}".encode()).hexdigest()
@@ -121,7 +121,7 @@ class GlinetAdapter(NetworkSourceAdapter):
         self._sid = sid
         return sid
 
-    async def _call(self, obj: str, method: str, params: dict | None = None) -> dict:
+    async def call(self, obj: str, method: str, params: dict | None = None) -> dict:
         """One ubus call, re-logging in once if the session expired."""
         if self._sid is None:
             await self._login()
@@ -133,6 +133,36 @@ class GlinetAdapter(NetworkSourceAdapter):
         if body.get("error"):
             raise RuntimeError(f"{obj}.{method}: {body['error']}")
         return body.get("result", {})
+
+
+class GlinetAdapter(NetworkSourceAdapter):
+    source_type = "glinet"
+
+    def __init__(self, config, settings) -> None:
+        super().__init__(config, settings)
+        opts = config.options or {}
+        self._username = opts.get("username", "root")
+        self._password = os.environ.get(
+            opts.get("password_env", "GLINET_PASSWORD"), opts.get("password", "")
+        )
+        self._rpc: GlinetRpcClient | None = None
+        # last cumulative byte counter per "<device_id>:<field>" — the API reports
+        # totals, the traffic layer expects per-poll deltas.
+        self._prev_counters: dict[str, float] = {}
+
+    async def start(self) -> None:
+        self._rpc = GlinetRpcClient(self.config.base_url, self._username,
+                                    self._password, self.settings.request_timeout,
+                                    label=self.id)
+        await self._rpc.open()
+
+    async def stop(self) -> None:
+        if self._rpc is not None:
+            await self._rpc.close()
+
+    async def _call(self, obj: str, method: str, params: dict | None = None) -> dict:
+        assert self._rpc is not None
+        return await self._rpc.call(obj, method, params)
 
     # --- normalization --------------------------------------------------------
     def _device_from_client(self, c: dict, channels: dict[str, int]) -> tuple[NetworkDevice, list[NetworkMetric]]:
@@ -172,14 +202,24 @@ class GlinetAdapter(NetworkSourceAdapter):
 
         metrics: list[NetworkMetric] = []
         t = now()
+        # clients.get_list reports *cumulative* totals; the traffic layer expects
+        # per-poll deltas. Diff against the previous poll (first observation only
+        # seeds the baseline). A counter that went backwards means the router
+        # rebooted — the current total is then the bytes since the reset.
         for field, mtype in (("total_rx", "device.rxBytes"), ("total_tx", "device.txBytes")):
             try:
-                val = float(c.get(field))
+                cur = float(c.get(field))
             except (TypeError, ValueError):
                 continue
+            key = f"{dev.id}:{field}"
+            prev = self._prev_counters.get(key)
+            self._prev_counters[key] = cur
+            if prev is None:
+                continue
+            delta = cur - prev if cur >= prev else cur
             metrics.append(NetworkMetric(
                 id=f"m_{mtype}_{dev.id}_{int(t)}", type=mtype, scope="device",
-                device_id=dev.id, value=val, unit="bytes", source=self.id, sampled_at=t))
+                device_id=dev.id, value=delta, unit="bytes", source=self.id, sampled_at=t))
         return dev, metrics
 
     def _router_metrics(self, sys_status: dict, out: list[NetworkMetric]) -> float | None:

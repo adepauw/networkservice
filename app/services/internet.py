@@ -103,11 +103,11 @@ class InternetHealthMonitor:
 
         # --- latency / jitter / packet-loss degradation -----------------------
         if latency is not None:
-            self._eval_latency(latency, reasons, emit)
+            self._eval_latency(latency, reasons, emit, resolve)
         if loss is not None:
-            self._eval_loss(loss, reasons, emit)
+            self._eval_loss(loss, reasons, emit, resolve)
         if jitter is not None:
-            self._eval_jitter(jitter, reasons, emit)
+            self._eval_jitter(jitter, reasons, emit, resolve)
 
         # --- WAN IP change ----------------------------------------------------
         wan_ip = hints.get("wan_ip")
@@ -171,7 +171,7 @@ class InternetHealthMonitor:
                 emit(EventType.DNS_DEGRADED.value, "warning", "DNS reageert niet", None, {"mac": "dns"})
                 self._dns_ok = False
 
-    def _eval_latency(self, latency, reasons, emit) -> None:
+    def _eval_latency(self, latency, reasons, emit, resolve) -> None:
         if latency > self.settings.latency_degraded_ms:
             self._latency_high_streak += 1
             if self._latency_high_streak >= self.settings.latency_failure_samples:
@@ -182,9 +182,11 @@ class InternetHealthMonitor:
                     self._latency_alerted = True
         else:
             self._latency_high_streak = 0
+            if self._latency_alerted:
+                resolve(f"{EventType.INTERNET_LATENCY_HIGH.value}:internet-latency")
             self._latency_alerted = False
 
-    def _eval_loss(self, loss, reasons, emit) -> None:
+    def _eval_loss(self, loss, reasons, emit, resolve) -> None:
         if loss > self.settings.packet_loss_degraded_percent:
             self._loss_high_streak += 1
             if self._loss_high_streak >= self.settings.packet_loss_failure_samples:
@@ -195,9 +197,11 @@ class InternetHealthMonitor:
                     self._loss_alerted = True
         else:
             self._loss_high_streak = 0
+            if self._loss_alerted:
+                resolve(f"{EventType.INTERNET_PACKET_LOSS_HIGH.value}:internet-loss")
             self._loss_alerted = False
 
-    def _eval_jitter(self, jitter, reasons, emit) -> None:
+    def _eval_jitter(self, jitter, reasons, emit, resolve) -> None:
         if jitter > self.settings.jitter_degraded_ms:
             reasons.append("jitter")
             if not self._jitter_alerted:
@@ -205,6 +209,8 @@ class InternetHealthMonitor:
                      "Onstabiele verbinding (jitter)", f"{round(jitter)} ms", {"mac": "internet-jitter"})
                 self._jitter_alerted = True
         else:
+            if self._jitter_alerted:
+                resolve(f"{EventType.INTERNET_JITTER_HIGH.value}:internet-jitter")
             self._jitter_alerted = False
 
     def _eval_status(self, external, reasons, emit, resolve, t) -> str:

@@ -132,18 +132,49 @@ class AdGuardSourceAdapter(_DnsAdapterBase):
         )
 
 
+def map_pihole_summary(data: dict) -> SourceDnsData:
+    """Map a Pi-hole v5 ``api.php?summaryRaw&topClients&topItems`` response.
+
+    ``top_sources`` keys are ``hostname|ip`` (or a bare ip); ``top_queries`` /
+    ``top_ads`` map domain → count. Pure, so unit-testable without a Pi-hole.
+    """
+    devices: list[DnsDeviceStats] = []
+    for key, count in (data.get("top_sources") or {}).items():
+        name, _, ip = str(key).partition("|")
+        devices.append(DnsDeviceStats(
+            display_name=name or ip or str(key), query_count=int(count),
+            metadata={"ip": ip or name}))
+    return SourceDnsData(
+        protection_enabled=data.get("status", "enabled") == "enabled",
+        query_count=int(data.get("dns_queries_today", 0)),
+        blocked_count=int(data.get("ads_blocked_today", 0)),
+        devices=devices,
+        top_domains=list((data.get("top_queries") or {}).keys())[:10],
+        top_blocked_domains=list((data.get("top_ads") or {}).keys())[:10],
+    )
+
+
 class PiHoleSourceAdapter(_DnsAdapterBase):
-    """Pi-hole. Skeleton: live path against the admin API
-    (``/admin/api.php?summaryRaw&topClients&topItems``, auth token)."""
+    """Pi-hole v5 admin API (``/admin/api.php?summaryRaw&topClients&topItems``,
+    token via ``options.token_env``/``token``). Pi-hole v6 moved to a different
+    ``/api`` with session auth — not wired yet; pin the v5 API if needed."""
 
     source_type = "pihole"
 
-    async def _fetch_live(self) -> SourceDnsData:  # pragma: no cover - real path TODO
-        # TODO(real): GET {base_url}/admin/api.php?summaryRaw&topClients&topItems
-        #   &auth=<token> and map dns_queries_today / ads_blocked_today / top_sources
-        #   / top_ads into SourceDnsData. Pi-hole v6 uses a different /api endpoint
-        #   with a session token — branch on options.api_version.
-        raise NotImplementedError("Pi-hole live API not yet wired — see TODO")
+    async def _fetch_live(self) -> SourceDnsData:  # pragma: no cover - needs a live Pi-hole
+        assert self._client is not None
+        base = self.config.base_url.rstrip("/")
+        params = {"summaryRaw": "", "topClients": "10", "topItems": "10"}
+        token = self._token or self._password
+        if token:
+            params["auth"] = token
+        resp = await self._client.get(f"{base}/admin/api.php", params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or not data:
+            # Pi-hole answers [] instead of an error on a bad/missing token.
+            raise RuntimeError("Pi-hole API returned no data (bad or missing auth token?)")
+        return map_pihole_summary(data)
 
 
 class DnsSourceAdapter(_DnsAdapterBase):

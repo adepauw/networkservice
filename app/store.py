@@ -28,6 +28,7 @@ from typing import Optional
 from .models import (
     DeviceMetadata,
     DnsSummary,
+    now,
     InternetHealthStatus,
     NetworkDevice,
     NetworkEvent,
@@ -88,6 +89,24 @@ class MetadataStore:
                 conn.execute("ALTER TABLE device_metadata ADD COLUMN ignored INTEGER DEFAULT 0")
             if "is_known" not in cols:
                 conn.execute("ALTER TABLE device_metadata ADD COLUMN is_known INTEGER")
+            # Open warning/critical events survive restarts here; the full event
+            # timeline stays a memory ring on purpose (see module docstring).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS alert_events (
+                    id              TEXT PRIMARY KEY,
+                    payload         TEXT NOT NULL,
+                    occurred_at     REAL,
+                    resolved_at     REAL,
+                    acknowledged_at REAL
+                )
+                """
+            )
+            # resolved alerts only matter briefly (post-mortem); keep the table tidy.
+            conn.execute(
+                "DELETE FROM alert_events WHERE resolved_at IS NOT NULL AND occurred_at < ?",
+                (now() - 30 * 86400,),
+            )
 
     def all(self) -> dict[str, DeviceMetadata]:
         with self._connect() as conn:
@@ -145,6 +164,38 @@ class MetadataStore:
                     meta.first_seen_at, meta.updated_at,
                 ),
             )
+
+    # --- alert persistence ------------------------------------------------------
+    def save_alert(self, event: NetworkEvent) -> None:
+        """Insert or refresh one alert row (also used to persist resolve/ack)."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO alert_events (id, payload, occurred_at, resolved_at, acknowledged_at)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    payload=excluded.payload,
+                    resolved_at=excluded.resolved_at,
+                    acknowledged_at=excluded.acknowledged_at
+                """,
+                (event.id, event.model_dump_json(), event.occurred_at,
+                 event.resolved_at, event.acknowledged_at),
+            )
+
+    def open_alerts(self) -> list[NetworkEvent]:
+        """Unresolved alerts, oldest first (so appendleft rebuilds newest-first)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT payload FROM alert_events WHERE resolved_at IS NULL"
+                " ORDER BY occurred_at"
+            ).fetchall()
+        out: list[NetworkEvent] = []
+        for r in rows:
+            try:
+                out.append(NetworkEvent.model_validate_json(r["payload"]))
+            except ValueError as exc:
+                log.warning("Skipping unreadable persisted alert: %s", exc)
+        return out
 
 
 class LiveStore:

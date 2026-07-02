@@ -63,6 +63,25 @@ class NetworkInventoryService:
                       "markeer als gast of negeer het.",
         }
 
+    def _maybe_alert_unknown(self, dev: NetworkDevice, emit) -> None:
+        """Raise the unknown-device alert (plus the randomized-MAC hint) for an
+        online, non-known, non-ignored device. The poller's per-MAC cooldown
+        keeps a flapping device from re-alerting more than once an hour."""
+        if dev.is_known or dev.ignored or not dev.is_online:
+            return
+        randomized = identity.is_randomized_mac(dev.mac_address)
+        # guests are expected on the network → a softer signal.
+        severity = "info" if dev.trust_level == "guest" else "warning"
+        emit(EventType.DEVICE_UNKNOWN_JOINED.value, severity,
+             f"Onbekend toestel gevonden: {dev.name}",
+             f"{dev.vendor or 'onbekende fabrikant'} · {', '.join(dev.ip_addresses) or '?'}",
+             dev, self._unknown_alert_metadata(dev, randomized))
+        if randomized:
+            emit(EventType.DEVICE_RANDOMIZED_MAC_SUSPECTED.value, "info",
+                 f"Toevallig MAC-adres vermoed: {dev.name}",
+                 "Het apparaat gebruikt waarschijnlijk een privacy-/random MAC-adres.",
+                 dev, {"mac": dev.mac_address})
+
     def merge(self, snapshots: list) -> list[NetworkDevice]:
         """Pure-ish merge: snapshots -> canonical, metadata-overlaid device list."""
         canonical: dict[str, NetworkDevice] = {}
@@ -110,25 +129,19 @@ class NetworkInventoryService:
                          f"Nieuw apparaat: {dev.name}",
                          dev.vendor or dev.host_name, dev, {"mac": dev.mac_address})
                     # unknown-device alert — but never for devices the user has
-                    # told us to ignore (no noisy alerts) nor for known ones.
-                    if not dev.is_known and not dev.ignored:
-                        randomized = identity.is_randomized_mac(dev.mac_address)
-                        # guests are expected on the network → a softer signal.
-                        severity = "info" if dev.trust_level == "guest" else "warning"
-                        emit(EventType.DEVICE_UNKNOWN_JOINED.value, severity,
-                             f"Onbekend toestel gevonden: {dev.name}",
-                             f"{dev.vendor or 'onbekende fabrikant'} · {', '.join(dev.ip_addresses) or '?'}",
-                             dev, self._unknown_alert_metadata(dev, randomized))
-                        if randomized:
-                            emit(EventType.DEVICE_RANDOMIZED_MAC_SUSPECTED.value, "info",
-                                 f"Toevallig MAC-adres vermoed: {dev.name}",
-                                 "Het apparaat gebruikt waarschijnlijk een privacy-/random MAC-adres.",
-                                 dev, {"mac": dev.mac_address})
+                    # told us to ignore (no noisy alerts), for known ones, nor for
+                    # a device the source lists as *offline* (router client lists
+                    # include historical clients that aren't actually present).
+                    self._maybe_alert_unknown(dev, emit)
             else:
                 dev.first_seen_at = old.first_seen_at
                 if old.is_known and not old.is_online and dev.is_online:
                     emit(EventType.DEVICE_ONLINE.value, "info",
                          f"{dev.name} is online", None, dev, {})
+                elif not old.is_online and dev.is_online and not baseline:
+                    # an unknown device re-joining after being away re-alerts,
+                    # throttled by the poller's per-MAC unknown-device cooldown.
+                    self._maybe_alert_unknown(dev, emit)
                 if set(old.ip_addresses) and set(dev.ip_addresses) and \
                         old.ip_addresses[0] != dev.ip_addresses[0]:
                     emit(EventType.DEVICE_IP_CHANGED.value, "info",

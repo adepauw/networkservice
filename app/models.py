@@ -87,6 +87,7 @@ class EventType(str, Enum):
     WIFI_SIGNAL_CRITICAL = "wifi.signalCritical"
     WIFI_SIGNAL_RECOVERED = "wifi.signalRecovered"
     WIFI_TOO_MANY_WEAK_CLIENTS = "wifi.tooManyWeakClients"
+    WIFI_WEAK_CLIENTS_RECOVERED = "wifi.weakClientsRecovered"
     WIFI_CLIENT_QUALITY_CHANGED = "wifi.clientQualityChanged"
     WIFI_RECONNECTED = "wifi.reconnected"
     INTERNET_ONLINE = "internet.online"

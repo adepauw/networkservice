@@ -186,6 +186,12 @@ class WifiQualityCoach:
                      {"mac": "wifi", "weak_count": weak_count})
                 self._too_many_alerted = True
         else:
+            if self._too_many_alerted:
+                # shared "mac" suffix lets the engine resolve the open alert.
+                emit(EventType.WIFI_WEAK_CLIENTS_RECOVERED.value, "success",
+                     "WiFi-signaal breed hersteld",
+                     "Het aantal zwakke WiFi-clients is weer normaal", None,
+                     {"mac": "wifi", "weak_count": weak_count})
             self._too_many_alerted = False
 
 

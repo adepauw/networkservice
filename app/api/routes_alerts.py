@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 
 from ..models import now
@@ -21,6 +23,8 @@ def build_router(engine) -> APIRouter:
             if ev.id == alert_id:
                 ev.acknowledged_at = now()
                 ev.resolved_at = ev.resolved_at or now()
+                if ev.is_alert:  # persist the ack so it survives a restart
+                    await asyncio.to_thread(engine.metadata.save_alert, ev)
                 return {"ok": True, "alert": ev.model_dump()}
         raise HTTPException(status_code=404, detail=f"unknown alert '{alert_id}'")
 

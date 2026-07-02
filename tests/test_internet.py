@@ -90,3 +90,16 @@ def test_router_unreachable_and_recovered():
     assert any(t == "router.unreachable" for t, _ in events)
     _run(m, {"internet_online": True, "router_online": True}, events)   # back up
     assert any(t == "router.recovered" for t, _ in events)
+
+
+def test_latency_recovery_resolves_open_alert():
+    m = InternetHealthMonitor(_settings(latency_degraded_ms=100, latency_failure_samples=2))
+    events: list = []
+    resolved: list = []
+    for _ in range(2):
+        asyncio.run(m.evaluate({"internet_online": True, "latency_ms": 150},
+                               _collect(events), resolved.append))
+    assert any(t == "internet.latencyHigh" for t, _ in events)
+    asyncio.run(m.evaluate({"internet_online": True, "latency_ms": 20},
+                           _collect(events), resolved.append))
+    assert "internet.latencyHigh:internet-latency" in resolved

@@ -195,3 +195,43 @@ def test_topology_endpoint_groups_devices():
         assert isinstance(t["counts"], dict)
         # the mock router should be present in a 'router' group
         assert any(g["id"] == "router" for g in t["groups"])
+
+
+def test_unignore_via_patch_clears_trust_sentinel():
+    """PATCH {"ignored": false} must actually un-ignore a device that was ignored
+    via /ignore (which also sets the legacy trust_level="ignored" sentinel)."""
+    with TestClient(app) as client:
+        devices = client.get("/devices").json()["devices"]
+        target = next(d for d in devices if d["mac_address"])
+        did = target["id"]
+
+        ignored = client.post(f"/devices/{did}/ignore").json()["device"]
+        assert ignored["ignored"] is True and ignored["trust_level"] == "ignored"
+
+        restored = client.patch(f"/devices/{did}", json={"ignored": False}).json()["device"]
+        assert restored["ignored"] is False
+        assert restored["trust_level"] != "ignored"
+
+
+def test_alert_persistence_roundtrip(tmp_path):
+    """Open alerts survive via SQLite: save → reload open ones; resolved ones
+    drop out of the open set."""
+    from app.models import NetworkEvent
+    from app.store import MetadataStore
+
+    store = MetadataStore(str(tmp_path / "alerts.db"))
+    store.init()
+    a = NetworkEvent(id="evt_a", type="wifi.signalPoor", severity="warning",
+                     title="Zwak signaal", dedupe_key="wifi.signalPoor:dev_x")
+    b = NetworkEvent(id="evt_b", type="internet.offline", severity="critical",
+                     title="Internet offline", dedupe_key="internet.offline:internet")
+    store.save_alert(a)
+    store.save_alert(b)
+    assert {e.id for e in store.open_alerts()} == {"evt_a", "evt_b"}
+
+    from app.models import now
+    a.resolved_at = now()
+    store.save_alert(a)  # persist the resolution
+    reloaded = store.open_alerts()
+    assert [e.id for e in reloaded] == ["evt_b"]
+    assert reloaded[0].dedupe_key == "internet.offline:internet"

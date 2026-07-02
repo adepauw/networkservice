@@ -126,7 +126,10 @@ class Settings:
     # device state stays in memory. Events/metrics are in-memory ring buffers.
     db_path: str = os.environ.get("NETWORK_DB_PATH", "/app/data/networkservice.db")
     event_buffer_size: int = _int("EVENT_BUFFER", 500)
-    metric_buffer_size: int = _int("METRIC_BUFFER", 2000)
+    # Sized for ~1h of history at 30s polls: ~30 devices × 2 traffic metrics +
+    # ~8 aggregate metrics ≈ 70 samples/poll → 8000 ≈ 115 polls. The traffic
+    # rollup's "last hour" window needs this; 2000 only covered ~12 minutes.
+    metric_buffer_size: int = _int("METRIC_BUFFER", 8000)
 
     # --- Sources --------------------------------------------------------------
     mock: bool = _bool("NETWORK_MOCK", True)

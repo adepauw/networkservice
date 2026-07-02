@@ -119,3 +119,34 @@ def test_offline_emitted_after_grace():
     events = []
     inv.reconcile(inv.merge([_snap([])]), _collect(events))
     assert EventType.DEVICE_OFFLINE.value in {e[0] for e in events}
+
+
+def test_offline_new_device_does_not_warn():
+    """Router client lists include historical (offline) clients — a new entry
+    that isn't actually online must not raise the unknown-device warning."""
+    _, live, inv = _engine()
+    _seed_baseline(inv, live)
+    events = []
+    fresh = inv.merge([_snap([NetworkDevice(id="x", mac_address="aa:bb:cc:00:0f:f1",
+                                            is_online=False)])])
+    live.set_devices(inv.reconcile(fresh, _collect(events)))
+    types = {e[0] for e in events}
+    assert EventType.DEVICE_FIRST_SEEN.value in types
+    assert EventType.DEVICE_UNKNOWN_JOINED.value not in types
+
+
+def test_unknown_device_realerts_on_rejoin():
+    """An unknown device that went away and comes back online re-alerts (the
+    poller's per-MAC cooldown throttles the frequency, not the inventory)."""
+    _, live, inv = _engine(offline_grace=0)
+    _seed_baseline(inv, live)
+    mac = "3e:9a:71:00:00:02"
+    dev = NetworkDevice(id="x", mac_address=mac, is_online=True)
+    live.set_devices(inv.reconcile(inv.merge([_snap([dev])]), _collect([])))
+    # vanishes; grace=0 so it is marked offline immediately
+    live.set_devices(inv.reconcile(inv.merge([_snap([])]), _collect([])))
+    # comes back
+    events = []
+    fresh = inv.merge([_snap([NetworkDevice(id="x", mac_address=mac, is_online=True)])])
+    live.set_devices(inv.reconcile(fresh, _collect(events)))
+    assert EventType.DEVICE_UNKNOWN_JOINED.value in {e[0] for e in events}

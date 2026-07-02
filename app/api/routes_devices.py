@@ -70,6 +70,11 @@ def build_router(engine) -> APIRouter:
                                     detail=f"invalid {field}: {updates[field]!r}")
 
         existing = engine.inventory.metadata_for(dev.mac_address)
+        # Un-ignoring must also clear the legacy trust sentinel, or the
+        # `trust_level == "ignored"` overlay re-ignores the device next poll.
+        if (updates.get("ignored") is False and "trust_level" not in updates
+                and "ignored" in ((existing.trust_level if existing else None), dev.trust_level)):
+            updates["trust_level"] = "unknown"
         meta = existing or DeviceMetadata(mac_address=dev.mac_address,
                                           first_seen_at=dev.first_seen_at)
         for k, v in updates.items():
@@ -202,7 +207,7 @@ def _presence_usage(engine, device_id: str) -> dict:
     or supporting device, plus its own presence-candidate flag."""
     primary_for: list[str] = []
     supporting_for: list[str] = []
-    for state in engine.presence._states.values():
+    for state in engine.presence.states():
         if device_id in state.primary_device_ids:
             primary_for.append(state.person_id)
         if device_id in state.supporting_device_ids:

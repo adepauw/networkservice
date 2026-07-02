@@ -88,3 +88,22 @@ def test_summary_counts_and_status():
     assert s.client_count == 2
     assert s.weak_client_count == 1
     assert s.status in ("poor", "fair")
+
+
+def test_too_many_weak_clients_recovers():
+    """The broad weak-clients alert emits a recovery event once the count drops,
+    so the engine can resolve the open alert."""
+    from app.models import EventType
+    coach = WifiQualityCoach(_settings(wifi_too_many_weak_clients=2))
+    weak = [_wifi_device(f"dev_w{i}", -80) for i in range(3)]
+    events = []
+    coach.evaluate(weak, _collect(events))
+    assert EventType.WIFI_TOO_MANY_WEAK_CLIENTS.value in {e[0] for e in events}
+    # signal improves → recovery event fires exactly once
+    good = [_wifi_device(f"dev_w{i}", -50) for i in range(3)]
+    events = []
+    coach.evaluate(good, _collect(events))
+    assert EventType.WIFI_WEAK_CLIENTS_RECOVERED.value in {e[0] for e in events}
+    events = []
+    coach.evaluate(good, _collect(events))
+    assert EventType.WIFI_WEAK_CLIENTS_RECOVERED.value not in {e[0] for e in events}

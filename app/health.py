@@ -47,16 +47,18 @@ async def probe_latency(
 ) -> dict:
     """Run ``samples`` handshakes (round-robin over hosts) and summarize.
 
+    The handshakes run concurrently: serially, an outage would stall the poll
+    tick ``samples × timeout`` seconds (20s at the defaults) — exactly when the
+    poller should stay responsive.
+
     Returns {reachable, latency_ms (mean of successes), jitter_ms (stdev),
     packet_loss_percent, samples, ok}. Never raises.
     """
     if not hosts or samples <= 0:
         return {"reachable": None, "latency_ms": None, "jitter_ms": None,
                 "packet_loss_percent": None, "samples": 0, "ok": 0}
-    results: list[Optional[float]] = []
-    for i in range(samples):
-        host = hosts[i % len(hosts)]
-        results.append(await _tcp_connect_ms(host, 443, timeout))
+    results: list[Optional[float]] = list(await asyncio.gather(
+        *(_tcp_connect_ms(hosts[i % len(hosts)], 443, timeout) for i in range(samples))))
     oks = [r for r in results if r is not None]
     loss = round(100.0 * (len(results) - len(oks)) / len(results), 1)
     latency = round(statistics.mean(oks), 1) if oks else None

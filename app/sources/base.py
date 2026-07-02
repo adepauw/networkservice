@@ -59,10 +59,17 @@ class NetworkSourceAdapter:
             self.last_error = str(exc)
             self.last_error_at = self.last_poll_at
             # Degrade gracefully: hand back the last good snapshot so the device
-            # list doesn't blink out on a single failed poll.
+            # list doesn't blink out on a single failed poll. Strip the per-poll
+            # observations though — replaying the same metric samples every failed
+            # poll inflates rolling traffic sums, and stale security signals /
+            # blocked events would re-fire as if freshly observed.
             if self._last_snapshot is not None:
                 stale = self._last_snapshot.model_copy()
                 stale.capabilities = []
+                stale.metrics = []
+                stale.security_signals = {}
+                if stale.dns is not None:
+                    stale.dns = stale.dns.model_copy(update={"blocked_events": []})
                 return stale
             return SourceSnapshot(source_id=self.id)
 

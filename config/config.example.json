@@ -75,7 +75,7 @@
       "id": "flint2",
       "type": "glinet",
       "display_name": "Flint 2",
-      "base_url": "http://192.168.8.1",
+      "base_url": "https://192.168.8.1:4443",
       "enabled": true,
       "capabilities": [
         "dhcpLeases",

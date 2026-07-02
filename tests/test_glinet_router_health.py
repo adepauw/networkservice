@@ -61,3 +61,26 @@ def test_router_metrics_missing_fields_are_skipped_not_faked():
 
     assert uptime is None
     assert out == []
+
+
+def test_client_traffic_counters_become_per_poll_deltas():
+    """clients.get_list reports cumulative totals; the traffic layer expects
+    per-poll deltas. First observation seeds silently, later polls emit the diff,
+    and a counter going backwards (router reboot) emits the post-reset total."""
+    adapter = _adapter()
+    client = {"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.8.42", "name": "nas",
+              "iface": "cable", "online": True, "total_rx": 1_000_000, "total_tx": 500_000}
+
+    _, metrics = adapter._device_from_client(client, {})
+    assert metrics == []  # baseline poll: no delta yet
+
+    client = dict(client, total_rx=1_600_000, total_tx=650_000)
+    _, metrics = adapter._device_from_client(client, {})
+    by_type = {m.type: m.value for m in metrics}
+    assert by_type == {"device.rxBytes": 600_000, "device.txBytes": 150_000}
+
+    # counter reset (reboot): current total = bytes since reset
+    client = dict(client, total_rx=40_000, total_tx=10_000)
+    _, metrics = adapter._device_from_client(client, {})
+    by_type = {m.type: m.value for m in metrics}
+    assert by_type == {"device.rxBytes": 40_000, "device.txBytes": 10_000}

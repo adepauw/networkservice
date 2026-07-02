@@ -49,3 +49,25 @@ def test_dns_degraded_when_protection_off():
                                        status="ok", protection_enabled=False)}
     summary = DnsService(Settings(dns_enabled=True)).build_summary([snap], [], statuses)
     assert summary.protection_status == "degraded"
+
+
+def test_map_pihole_summary():
+    from app.sources.dns import map_pihole_summary
+    data = {
+        "status": "enabled",
+        "dns_queries_today": 12345,
+        "ads_blocked_today": 678,
+        "top_sources": {"nas|192.168.8.10": 4000, "192.168.8.20": 2000},
+        "top_queries": {"apple.com": 500, "github.com": 300},
+        "top_ads": {"ads.example.net": 100},
+    }
+    out = map_pihole_summary(data)
+    assert out.protection_enabled is True
+    assert out.query_count == 12345 and out.blocked_count == 678
+    by_name = {d.display_name: d for d in out.devices}
+    assert by_name["nas"].metadata["ip"] == "192.168.8.10"
+    assert by_name["192.168.8.20"].query_count == 2000
+    assert out.top_domains == ["apple.com", "github.com"]
+    assert out.top_blocked_domains == ["ads.example.net"]
+    # disabled protection is reported honestly
+    assert map_pihole_summary({"status": "disabled"}).protection_enabled is False

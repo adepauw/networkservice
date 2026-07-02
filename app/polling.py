@@ -49,6 +49,26 @@ from .store import LiveStore, MetadataStore
 
 log = logging.getLogger("networkservice.engine")
 
+# A recovery event closes the open alert(s) of its degraded counterpart. Each
+# pair shares a dedupe suffix (device_id / mac), so resolution is mechanical.
+# The internet monitor resolves its own pairs (offline/degraded/dns/router).
+_RECOVERY_PAIRS: dict[str, tuple[str, ...]] = {
+    EventType.WIFI_SIGNAL_RECOVERED.value: (
+        EventType.WIFI_SIGNAL_POOR.value, EventType.WIFI_SIGNAL_CRITICAL.value),
+    EventType.WIFI_WEAK_CLIENTS_RECOVERED.value: (
+        EventType.WIFI_TOO_MANY_WEAK_CLIENTS.value,),
+    EventType.DNS_PROTECTION_RECOVERED.value: (EventType.DNS_PROTECTION_DEGRADED.value,),
+    EventType.VPN_SOURCE_RECOVERED.value: (EventType.VPN_SOURCE_DEGRADED.value,),
+}
+
+# User-initiated events (Wake-on-LAN) must always land on the timeline — never
+# suppressed by the dedupe cooldown.
+_NO_DEDUPE = {
+    EventType.DEVICE_WAKE_REQUESTED.value,
+    EventType.DEVICE_WAKE_SENT.value,
+    EventType.DEVICE_WAKE_FAILED.value,
+}
+
 
 def _mbps(bps: float | None) -> str:
     """Format a bits-per-second value as a compact Mbps string for event copy."""
@@ -96,6 +116,13 @@ class NetworkEngine:
     async def start(self) -> None:
         self.metadata.init()
         self.inventory.load_metadata()
+        # Restore unresolved alerts into the live ring so an open problem
+        # survives a restart (rows come oldest-first; appendleft → newest first).
+        # The id guard keeps an in-process lifespan restart from duplicating.
+        existing_ids = {e.id for e in self.live.events}
+        for ev in self.metadata.open_alerts():
+            if ev.id not in existing_ids:
+                self.live.append_event(ev)
         for a in self.adapters:
             with contextlib.suppress(Exception):
                 await a.start()
@@ -131,8 +158,14 @@ class NetworkEngine:
         meta = dict(metadata or {})
         if isinstance(target, str):
             meta.setdefault("person_id", target)
-        dedupe = f"{type_}:{device_id or meta.get('person_id') or meta.get('mac') or title}"
+        suffix = device_id or meta.get("person_id") or meta.get("mac") or title
+        dedupe = f"{type_}:{suffix}"
         t = now()
+
+        # A recovery event closes its degraded counterpart's open alert — even
+        # when the recovery event itself gets dedupe-suppressed below.
+        for paired in _RECOVERY_PAIRS.get(type_, ()):
+            self._resolve_open(f"{paired}:{suffix}")
 
         # per-MAC cooldown for the unknown-device alert
         if type_ == EventType.DEVICE_UNKNOWN_JOINED.value:
@@ -141,7 +174,7 @@ class NetworkEngine:
             if t - last < self.settings.unknown_device_alert_cooldown_seconds:
                 return
             self._unknown_cooldowns[mac] = t
-        else:
+        elif type_ not in _NO_DEDUPE:
             last = self._cooldowns.get(dedupe, 0)
             if t - last < self.settings.event_dedupe_cooldown_seconds:
                 return
@@ -152,9 +185,25 @@ class NetworkEngine:
             title=title, message=message, device_id=device_id,
             source=meta.get("source"), dedupe_key=dedupe, metadata=meta,
         )
+        if event.is_alert:
+            # a fresh alert supersedes an older open one with the same dedupe key
+            # (e.g. one restored from SQLite after a restart) — never two open
+            # copies of the same condition.
+            prior = self.live.find_open_event(dedupe)
+            if prior is not None:
+                prior.resolved_at = t
+                self._persist_alert(prior)
+            self._persist_alert(event)
         self.live.append_event(event)
         broker.publish(type_, {"id": event.id, "type": type_, "severity": severity, "title": title})
         return event
+
+    def _persist_alert(self, event: NetworkEvent) -> None:
+        """Best-effort SQLite write; a storage hiccup must never break a poll."""
+        try:
+            self.metadata.save_alert(event)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to persist alert %s: %s", event.id, exc)
 
     def emit_event(self, type_, severity, title, message, target=None, metadata=None):
         """Public event-emit for request-driven events (e.g. Wake-on-LAN). Goes
@@ -165,6 +214,8 @@ class NetworkEngine:
         ev = self.live.find_open_event(dedupe_key)
         if ev:
             ev.resolved_at = now()
+            if ev.is_alert:
+                self._persist_alert(ev)
 
     # --- one poll tick --------------------------------------------------------
     async def poll_once(self) -> None:
@@ -207,7 +258,18 @@ class NetworkEngine:
             vpn=self.live.vpn_summary, topology=self.live.topology)
         self.live.last_poll_at = now()
         self.live.last_error = None
+        self._prune_cooldowns()
         broker.publish("changed", {"reason": "poll"})
+
+    def _prune_cooldowns(self) -> None:
+        """Drop expired dedupe entries so the cooldown maps stay bounded over
+        months of uptime (keys accrue per device/title otherwise)."""
+        t = now()
+        cd = self.settings.event_dedupe_cooldown_seconds
+        self._cooldowns = {k: ts for k, ts in self._cooldowns.items() if t - ts < cd}
+        ucd = self.settings.unknown_device_alert_cooldown_seconds
+        self._unknown_cooldowns = {k: ts for k, ts in self._unknown_cooldowns.items()
+                                   if t - ts < ucd}
 
     # emit adapters that match the (type, severity, title, message, target, metadata) shape
     def _emit_inventory(self, type_, severity, title, message, target, metadata):
@@ -290,20 +352,22 @@ class NetworkEngine:
             self._dns_protection_ok = None
             return
 
+        # the shared "mac" gives the degraded/recovered pair one dedupe suffix so
+        # recovery can resolve the open alert (see _RECOVERY_PAIRS).
         ok = summary.protection_status == "active"
         if self._dns_protection_ok is None:
             # baseline: announce active once, silently seed degraded.
             if ok:
                 self._emit(EventType.DNS_PROTECTION_ACTIVE.value, "info",
-                           "DNS-bescherming actief", None, None, {})
+                           "DNS-bescherming actief", None, None, {"mac": "dns-protection"})
         elif ok and not self._dns_protection_ok:
             self._emit(EventType.DNS_PROTECTION_RECOVERED.value, "info",
-                       "DNS-bescherming hersteld", None, None, {})
+                       "DNS-bescherming hersteld", None, None, {"mac": "dns-protection"})
         elif not ok and self._dns_protection_ok:
             self._emit(EventType.DNS_PROTECTION_DEGRADED.value, "warning",
                        "DNS-bescherming verstoord",
                        "Een DNS-bron meldt dat bescherming uit staat of onbereikbaar is.",
-                       None, {})
+                       None, {"mac": "dns-protection"})
         self._dns_protection_ok = ok
 
         # blocked-spike: blocked-% jumps well above the rolling baseline.
@@ -353,11 +417,11 @@ class NetworkEngine:
             elif ok and not prev:
                 self._emit(EventType.VPN_SOURCE_RECOVERED.value, "info",
                            f"VPN hersteld: {src.display_name}", None, None,
-                           {"source": src.id})
+                           {"source": src.id, "mac": f"vpn-src-{src.id}"})
             elif not ok and prev:
                 self._emit(EventType.VPN_SOURCE_DEGRADED.value, "warning",
                            f"VPN verstoord: {src.display_name}", None, None,
-                           {"source": src.id})
+                           {"source": src.id, "mac": f"vpn-src-{src.id}"})
             self._vpn_source_ok[src.id] = ok
 
         # per-peer connect/disconnect/stale transitions

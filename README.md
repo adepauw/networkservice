@@ -120,7 +120,7 @@ uvicorn app.main:app --reload --port 8103
 
 ```bash
 pip install pytest
-NETWORK_DB_PATH=./data/test.db python -m pytest -q
+python -m pytest -q   # conftest.py provisions a temp SQLite path automatically
 ```
 
 Covered: MAC-based identity & merge (IP change doesn't duplicate a device),

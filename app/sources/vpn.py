@@ -2,9 +2,10 @@
 
 Each turns a VPN backend's peer list into a normalized ``SourceVpnData`` on the
 snapshot. As with the DNS adapters, an unconfigured/mock instance serves realistic
-peers so the VPN card is demoable; a real ``base_url``/socket path runs the live
-fetch (Tailscale is wired against ``tailscale status --json``; WireGuard parses
-``wg show``; GL.iNet/OpenWrt are skeletons).
+peers so the VPN card is demoable; a real config runs the live fetch (Tailscale
+shells out to ``tailscale status --json``; WireGuard parses ``wg show <iface>
+dump``; GL.iNet reads the Flint's ``wg-server``/``ovpn-server`` status over the
+same authenticated JSON-RPC the router adapter uses; OpenWrt stays a skeleton).
 
 Read-only: these adapters only *observe* tunnel state — they never bring a tunnel
 up/down or change peer config.
@@ -15,11 +16,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Any
 
 from ..models import SourceSnapshot, SourceVpnData, VpnPeer
 from .base import NetworkSourceAdapter
+from .glinet import GlinetRpcClient
 
 log = logging.getLogger("networkservice.sources.vpn")
 
@@ -98,28 +101,147 @@ class TailscaleSourceAdapter(_VpnAdapterBase):
                              peers=peers)
 
 
+def parse_wg_dump(text: str, stale_seconds: int) -> SourceVpnData:
+    """Parse ``wg show <iface> dump`` output (tab-separated, stable format).
+
+    The first line describes the interface itself; every further line is a peer:
+    pubkey, preshared-key, endpoint, allowed-ips, latest-handshake, rx, tx,
+    keepalive. A peer with a recent handshake is connected; an old handshake is
+    stale; no handshake ever = disconnected.
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    peers: list[VpnPeer] = []
+    t = time.time()
+    for ln in lines[1:]:
+        cols = ln.split("\t")
+        if len(cols) < 8:
+            continue
+        pubkey, _psk, endpoint, allowed_ips, handshake, rx, tx, _keepalive = cols[:8]
+        try:
+            hs: float | None = float(handshake) or None  # "0" = never handshaken
+        except ValueError:
+            hs = None
+        if hs is not None and (t - hs) <= stale_seconds:
+            status = "connected"
+        elif hs is not None:
+            status = "stale"
+        else:
+            status = "disconnected"
+        peers.append(VpnPeer(
+            id=pubkey[:16], type="wireguard", status=status,  # type: ignore[arg-type]
+            display_name=endpoint if endpoint not in ("", "(none)") else pubkey[:12],
+            ip_addresses=[ip.split("/")[0] for ip in allowed_ips.split(",")
+                          if ip and ip != "(none)"],
+            last_handshake_at=hs, last_seen_at=hs,
+            rx_bytes=float(rx) if rx.isdigit() else None,
+            tx_bytes=float(tx) if tx.isdigit() else None,
+            metadata={"endpoint": endpoint},
+        ))
+    online = any(p.status == "connected" for p in peers)
+    return SourceVpnData(
+        status="online" if online else ("degraded" if peers else "unknown"),
+        peers=peers)
+
+
 class WireGuardSourceAdapter(_VpnAdapterBase):
-    """WireGuard. Skeleton: parse ``wg show <iface> dump`` (read-only) into peers."""
+    """WireGuard on the local host. Runs ``wg show <iface> dump`` (read-only;
+    ``options.binary`` / ``options.interface`` configurable) and parses the
+    tab-separated peer rows."""
 
     source_type = "wireguard"
 
-    async def _fetch_live(self) -> SourceVpnData:  # pragma: no cover - real path TODO
-        # TODO(real): run `wg show <iface> dump`, parse the tab-separated peer rows
-        #   (pubkey, endpoint, allowed-ips, latest-handshake, rx, tx) and map them
-        #   into VpnPeer. status = online if at least one recent handshake.
-        raise NotImplementedError("WireGuard live parse not yet wired — see TODO")
+    def __init__(self, config, settings) -> None:
+        super().__init__(config, settings)
+        opts = config.options or {}
+        # a local binary needs no base_url; live when an interface is configured.
+        self._mock = bool(opts.get("mock")) or not opts.get("interface")
+
+    async def _fetch_live(self) -> SourceVpnData:  # pragma: no cover - needs wg binary
+        opts = self.config.options or {}
+        binary = opts.get("binary", "wg")
+        iface = opts.get("interface", "wg0")
+        proc = await asyncio.create_subprocess_exec(
+            binary, "show", iface, "dump",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"wg show {iface} dump: {err.decode().strip() or 'failed'}")
+        return parse_wg_dump(out.decode(), self.settings.vpn_peer_stale_seconds)
+
+
+def _glinet_peer(raw: dict) -> VpnPeer:
+    """Map one ``wg-server.get_status`` peer row. Field names vary slightly
+    across 4.x firmwares, so the common candidates are read defensively."""
+    name = str(raw.get("name") or raw.get("alias") or raw.get("client_name")
+               or (raw.get("public_key") or "")[:12] or "peer")
+    hs_raw = raw.get("latest_handshake") or raw.get("last_handshake_time")
+    try:
+        hs: float | None = float(hs_raw) if hs_raw else None
+    except (TypeError, ValueError):
+        hs = None
+    online = bool(raw.get("online")) or (hs is not None and time.time() - hs < 300)
+
+    def _num(v: Any) -> float | None:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    return VpnPeer(
+        id=str(raw.get("id") or raw.get("public_key") or name),
+        display_name=name, type="glinet_vpn",
+        status="connected" if online else "disconnected",
+        ip_addresses=[str(raw[k]).split("/")[0]
+                      for k in ("ip", "address", "address_v4") if raw.get(k)],
+        last_handshake_at=hs, last_seen_at=hs,
+        rx_bytes=_num(raw.get("rx_bytes") or raw.get("rx")),
+        tx_bytes=_num(raw.get("tx_bytes") or raw.get("tx")),
+    )
 
 
 class GlinetVpnSourceAdapter(_VpnAdapterBase):
-    """GL.iNet VPN (WireGuard/OpenVPN server on the Flint). Skeleton — uses the
-    GL.iNet RPC the router adapter already authenticates against."""
+    """GL.iNet VPN servers (WireGuard/OpenVPN) on the Flint 2, over the same
+    authenticated JSON-RPC flow the router adapter uses (own session).
+
+    Reads only ``wg-server.get_status`` / ``ovpn-server.get_status`` — peer list
+    plus a running flag, shapes verified against a live Flint 2. Deliberately
+    never ``get_config``: that call echoes the server's *private key*.
+    """
 
     source_type = "glinet_vpn"
 
-    async def _fetch_live(self) -> SourceVpnData:  # pragma: no cover - real path TODO
-        # TODO(real): reuse the GL.iNet JSON-RPC session (see sources/glinet.py) and
-        #   call the wireguard-server/openvpn-server client-list method.
-        raise NotImplementedError("GL.iNet VPN live API not yet wired — see TODO")
+    def __init__(self, config, settings) -> None:
+        super().__init__(config, settings)
+        opts = config.options or {}
+        self._username = opts.get("username", "root")
+        self._password = os.environ.get(
+            opts.get("password_env", "GLINET_PASSWORD"), opts.get("password", ""))
+        self._rpc: GlinetRpcClient | None = None
+        # the router URL has a sane default, so live mode keys off credentials.
+        self._mock = bool(opts.get("mock")) or not (self.config.base_url or self._password)
+
+    async def start(self) -> None:
+        if not self._mock:
+            self._rpc = GlinetRpcClient(self.config.base_url, self._username,
+                                        self._password, self.settings.request_timeout,
+                                        label=self.id)
+            await self._rpc.open()
+
+    async def stop(self) -> None:
+        if self._rpc is not None:
+            await self._rpc.close()
+
+    async def _fetch_live(self) -> SourceVpnData:  # pragma: no cover - needs the router
+        assert self._rpc is not None
+        wg = await self._rpc.call("wg-server", "get_status")
+        running = int((wg.get("server") or {}).get("status") or 0) == 1
+        peers = [_glinet_peer(raw) for raw in wg.get("peers") or []]
+        try:
+            ovpn = await self._rpc.call("ovpn-server", "get_status")
+            running = running or int(ovpn.get("status") or 0) == 1
+        except Exception as exc:  # noqa: BLE001 — OpenVPN module may be absent
+            log.debug("ovpn-server.get_status failed: %s", exc)
+        return SourceVpnData(status="online" if running else "offline", peers=peers)
 
 
 class OpenWrtVpnSourceAdapter(_VpnAdapterBase):
